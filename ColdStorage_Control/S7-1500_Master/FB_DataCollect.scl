@@ -1,0 +1,136 @@
+{Scl_export_offset 0}
+// ============================================================
+// FB_DataCollect - 数据汇总功能块
+// 冷库温度控制系统 - S7-1500 主站
+// ============================================================
+// 功能:
+//   1. 汇总9个冷库的运行状态
+//   2. 计算全局统计 (总运行台数/总故障数/总可用数)
+//   3. 生成全局报警摘要
+//   4. 生成全局状态字 (供WinCC)
+// ============================================================
+
+FUNCTION_BLOCK "FB_DataCollect"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_INPUT
+      bEnable            : Bool;       // 使能
+   END_VAR
+
+   VAR_OUTPUT
+      iTotalActive       : Int;        // 全系统运行压缩机总数
+      iTotalFault        : Int;        // 全系统故障压缩机总数
+      iTotalAvailable    : Int;        // 全系统可用压缩机总数
+      bGlobalAlarm       : Bool;       // 全局报警
+      bGlobalCritical    : Bool;       // 全局严重报警
+      iAlarmRoomCount    : Int;        // 报警冷库数量
+      wGlobalStatus      : Word;       // 全局状态字
+   END_VAR
+
+   VAR_TEMP
+      i                  : Int;
+      wTemp              : Word;
+   END_VAR
+
+BEGIN
+
+   // 默认值
+   iTotalActive := 0;
+   iTotalFault := 0;
+   iTotalAvailable := 0;
+   bGlobalAlarm := FALSE;
+   bGlobalCritical := FALSE;
+   iAlarmRoomCount := 0;
+   wTemp := 16#0000;
+
+   IF NOT bEnable THEN
+      wGlobalStatus := 16#0000;
+      RETURN;
+   END_IF;
+
+   // ================================================================
+   // 1. 汇总9个冷库统计
+   // ================================================================
+   FOR i := 1 TO 9 DO
+      iTotalActive    := iTotalActive    + "DB_GlobalData".aRoom[i].iActive_Count;
+      iTotalFault     := iTotalFault     + "DB_GlobalData".aRoom[i].iFault_Count;
+      iTotalAvailable := iTotalAvailable + "DB_GlobalData".aRoom[i].iAvailable_Count;
+
+      // 任一库有报警 → 全局报警
+      IF "DB_GlobalData".aRoom[i].bAnyAlarm THEN
+         bGlobalAlarm := TRUE;
+         iAlarmRoomCount := iAlarmRoomCount + 1;
+      END_IF;
+
+      // 任一库严重报警 → 全局严重报警
+      IF "DB_GlobalData".aRoom[i].bCriticalAlarm THEN
+         bGlobalCritical := TRUE;
+      END_IF;
+   END_FOR;
+
+   // ================================================================
+   // 2. 生成全局状态字
+   //    Bit0: 系统运行中 (有压缩机在运行)
+   //    Bit1: 有报警
+   //    Bit2: 有严重报警
+   //    Bit3: 通信全部正常
+   //    Bit4-12: 各库通信状态 (1=正常)
+   //    Bit13: 可用压缩机充足 (>=80台, 即至少8台×10)
+   //    Bit14: 系统正常 (无任何报警)
+   //    Bit15: 系统使能
+   // ================================================================
+   IF iTotalActive > 0 THEN
+      wTemp := wTemp OR 16#0001;
+   END_IF;
+
+   IF bGlobalAlarm THEN
+      wTemp := wTemp OR 16#0002;
+   END_IF;
+
+   IF bGlobalCritical THEN
+      wTemp := wTemp OR 16#0004;
+   END_IF;
+
+   // 各库通信状态
+   FOR i := 1 TO 9 DO
+      IF "DB_GlobalData".aRoom[i].bComm_OK THEN
+         wTemp := wTemp OR (SHL(IN := 16#0001, N := (3 + i)));
+      END_IF;
+   END_FOR;
+
+   // 全部通信正常
+   IF ("DB_GlobalData".aRoom[1].bComm_OK AND "DB_GlobalData".aRoom[2].bComm_OK
+   AND "DB_GlobalData".aRoom[3].bComm_OK AND "DB_GlobalData".aRoom[4].bComm_OK
+   AND "DB_GlobalData".aRoom[5].bComm_OK AND "DB_GlobalData".aRoom[6].bComm_OK
+   AND "DB_GlobalData".aRoom[7].bComm_OK AND "DB_GlobalData".aRoom[8].bComm_OK
+   AND "DB_GlobalData".aRoom[9].bComm_OK) THEN
+      wTemp := wTemp OR 16#0008;
+   END_IF;
+
+   // 可用压缩机充足
+   IF iTotalAvailable >= 80 THEN
+      wTemp := wTemp OR 16#2000;
+   END_IF;
+
+   // 系统正常
+   IF NOT bGlobalAlarm THEN
+      wTemp := wTemp OR 16#4000;
+   END_IF;
+
+   // 系统使能
+   wTemp := wTemp OR 16#8000;
+
+   wGlobalStatus := wTemp;
+
+   // ================================================================
+   // 3. 回写到全局数据块
+   // ================================================================
+   "DB_GlobalData".iTotalActive := iTotalActive;
+   "DB_GlobalData".iTotalFault := iTotalFault;
+   "DB_GlobalData".iTotalAvailable := iTotalAvailable;
+   "DB_GlobalData".bGlobalAlarm := bGlobalAlarm;
+   "DB_GlobalData".bGlobalCritical := bGlobalCritical;
+   "DB_GlobalData".iAlarmRoomCount := iAlarmRoomCount;
+
+END_FUNCTION_BLOCK
