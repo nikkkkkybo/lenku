@@ -1,0 +1,156 @@
+{Scl_export_offset 0}
+// ============================================================
+// FB_Defrost - 化霜控制功能块
+// 冷库温度控制系统 - S7-1200 冷库控制器
+// ============================================================
+// 功能:
+//   1. 定时化霜: 每隔设定周期 (如6小时) 自动启动化霜
+//   2. 化霜终止条件: 时间到 或 蒸发器温度达到设定值
+//   3. 化霜期间停止该库所有压缩机
+//   4. 化霜后排水等待 (防止水滴影响温度)
+//   5. 支持手动触发化霜
+//   6. 化霜加热器输出控制
+// ============================================================
+// 化霜状态机:
+//   状态0 (待机)   → 周期到达 → 状态1
+//   状态1 (化霜中) → 时间到/温度到 → 状态2
+//   状态2 (排水)   → 排水时间到 → 状态0
+// ============================================================
+
+FUNCTION_BLOCK "FB_Defrost"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_INPUT
+      // --- 触发 ---
+      bEnable            : Bool;       // 化霜功能使能
+      bManualStart       : Bool;       // 手动触发化霜
+
+      // --- 蒸发器温度 ---
+      rEvapTemp          : Real;       // 蒸发器温度 (degC)
+
+      // --- 设定参数 ---
+      tDefrostCycle      : Time := T#6h;    // 化霜周期 (多久化一次霜)
+      tDefrostMaxTime    : Time := T#30m;   // 化霜最长时间
+      tDrainTime         : Time := T#5m;    // 化霜后排水时间
+      rDefrostEndTemp    : Real := 10.0;    // 化霜终止温度 (degC)
+   END_VAR
+
+   VAR_OUTPUT
+      bDefrostActive     : Bool;       // 化霜进行中 (用于禁止制冷)
+      bDefrostHeater     : Bool;       // 化霜加热器输出
+      bDefrostDrain      : Bool;       // 排水阶段
+      iDefrostState      : Int;        // 化霜状态 (0=待机,1=化霜,2=排水)
+      tIntervalElapsed   : Time;       // 距上次化霜经过的时间
+   END_VAR
+
+   VAR_TEMP
+      bManualEdge        : Bool;       // 手动触发上升沿
+   END_VAR
+
+   VAR
+      // --- 状态机 ---
+      iState             : Int;        // 内部状态 (0=待机,1=化霜,2=排水)
+
+      // --- 计时器 ---
+      tIntervalTimer     : Time;       // 化霜间隔计时器 (累计距上次化霜时间)
+      tDefrostTimer      : Time;       // 化霜持续计时器
+      tDrainTimer        : Time;       // 排水持续计时器
+      tScanTime          : Time;       // 扫描周期
+
+      // --- 边沿检测 ---
+      bLastManualStart   : Bool;       // 上一次手动触发
+   END_VAR
+
+BEGIN
+
+   tScanTime := T#10ms;
+
+   // ================================================================
+   // 0. 未使能时不执行化霜
+   // ================================================================
+   IF NOT bEnable THEN
+      bDefrostActive := FALSE;
+      bDefrostHeater := FALSE;
+      bDefrostDrain := FALSE;
+      iDefrostState := 0;
+      iState := 0;
+      RETURN;
+   END_IF;
+
+   // 手动触发上升沿检测
+   bManualEdge := bManualStart AND NOT bLastManualStart;
+   bLastManualStart := bManualStart;
+
+   // ================================================================
+   // 1. 化霜状态机
+   // ================================================================
+   CASE iState OF
+
+      // ================================================================
+      // 状态0: 待机 (正常制冷状态)
+      // ================================================================
+      0:
+         bDefrostActive := FALSE;
+         bDefrostHeater := FALSE;
+         bDefrostDrain := FALSE;
+
+         // 间隔计时器累计
+         tIntervalTimer := tIntervalTimer + tScanTime;
+         tIntervalElapsed := tIntervalTimer;
+
+         // 触发条件: 定时周期到达 或 手动触发
+         IF (tIntervalTimer >= tDefrostCycle) OR bManualEdge THEN
+            iState := 1;                    // 进入化霜状态
+            tDefrostTimer := T#0s;          // 重置化霜计时器
+            tIntervalTimer := T#0s;         // 重置间隔计时器
+         END_IF;
+
+      // ================================================================
+      // 状态1: 化霜中
+      //   - 停止所有压缩机 (通过 bDefrostActive 通知温度控制)
+      //   - 开启化霜加热器
+      //   - 终止条件: 时间到 或 蒸发器温度达标
+      // ================================================================
+      1:
+         bDefrostActive := TRUE;
+         bDefrostHeater := TRUE;
+         bDefrostDrain := FALSE;
+
+         tDefrostTimer := tDefrostTimer + tScanTime;
+
+         // 化霜终止条件
+         IF (tDefrostTimer >= tDefrostMaxTime) OR (rEvapTemp >= rDefrostEndTemp) THEN
+            iState := 2;                    // 进入排水状态
+            tDrainTimer := T#0s;            // 重置排水计时器
+            bDefrostHeater := FALSE;        // 关闭加热器
+         END_IF;
+
+      // ================================================================
+      // 状态2: 化霜后排水
+      //   - 关闭加热器
+      //   - 等待排水完成 (防止水滴影响温度传感器)
+      //   - 排水完成后恢复正常制冷
+      // ================================================================
+      2:
+         bDefrostActive := TRUE;            // 仍标记为化霜中 (禁止制冷)
+         bDefrostHeater := FALSE;
+         bDefrostDrain := TRUE;
+
+         tDrainTimer := tDrainTimer + tScanTime;
+
+         IF tDrainTimer >= tDrainTime THEN
+            iState := 0;                    // 回到待机状态
+            bDefrostActive := FALSE;
+            bDefrostDrain := FALSE;
+            tIntervalTimer := T#0s;         // 重置间隔计时器
+         END_IF;
+
+   END_CASE;
+
+   // ================================================================
+   // 2. 输出状态
+   // ================================================================
+   iDefrostState := iState;
+
+END_FUNCTION_BLOCK
