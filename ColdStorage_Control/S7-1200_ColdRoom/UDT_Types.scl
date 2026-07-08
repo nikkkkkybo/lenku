@@ -1,0 +1,115 @@
+{Scl_export_offset 0}
+// ============================================================
+// UDT 数据类型定义
+// 冷库温度控制系统 - S7-1200 冷库控制器
+// ============================================================
+// 文件包含两个用户数据类型:
+//   1. UDT_Compressor  - 单台压缩机数据结构
+//   2. UDT_ColdRoom    - 冷库整体数据结构
+// ============================================================
+
+
+// ============================================================
+// UDT_Compressor: 单台压缩机数据结构
+// 每台制冷机一个实例, 实现完全独立控制
+// ============================================================
+TYPE "UDT_Compressor"
+VERSION : 0.1
+   STRUCT
+      // --- 运行控制 ---
+      bRun_Cmd          : Bool;       // 运行命令输出 (到接触器线圈)
+      bRun_Feedback     : Bool;       // 运行反馈 (接触器辅助触点)
+      bRunning          : Bool;       // 运行中标志 (已确认运行)
+      bStarting         : Bool;       // 启动过渡中标志
+
+      // --- 故障与保护 ---
+      bOverload         : Bool;       // 过载信号 (热继电器)
+      bFault            : Bool;       // 故障标志 (综合故障)
+      bFault_Latched    : Bool;       // 故锁存 (需手动复位)
+      bIsolated         : Bool;       // 隔离标志 (手动旁路, 维修用)
+      bEnable           : Bool;       // 使能 (未隔离且未故障)
+
+      // --- 运行统计 ---
+      diRunTime         : DInt;       // 累计运行时间 (单位: 秒)
+      diStartCount      : DInt;       // 累计启动次数
+      tFB_Delay         : Time;       // 运行反馈超时计时器
+
+      // --- 轮换 ---
+      iRotationPriority : Int;        // 轮换优先级 (1=最高优先启动)
+
+      // --- 手动操作 ---
+      bManual_Mode      : Bool;       // 手动/自动模式 (TRUE=手动)
+      bManual_Start     : Bool;       // 手动启动按钮
+      bManual_Stop      : Bool;       // 手动停止按钮
+      bFault_Reset      : Bool;       // 故障复位按钮
+   END_STRUCT;
+END_TYPE
+
+
+// ============================================================
+// UDT_ColdRoom: 冷库整体数据结构
+// 每个冷库一个实例, 包含温度控制和10台压缩机
+// ============================================================
+TYPE "UDT_ColdRoom"
+VERSION : 0.1
+   STRUCT
+      // === 温度传感器 ===
+      rTemp_Sensor1     : Real;       // 主传感器温度 (PT100)
+      rTemp_Sensor2     : Real;       // 备用传感器温度 (PT100)
+      rTemp_Actual      : Real;       // 实际使用温度 (冗余处理后)
+      rEvap_Temp        : Real;       // 蒸发器温度 (化霜用)
+
+      // === 温度设定值 ===
+      rTemp_HighLimit   : Real;       // 启动温度上限 (如 -16.0 degC)
+      rTemp_LowLimit    : Real;       // 停止温度下限 (如 -20.0 degC)
+      rTemp_AlarmHigh   : Real;       // 超温报警值   (如 -10.0 degC)
+      rSensor_MinRange  : Real;       // 传感器有效范围下限 (如 -50.0)
+      rSensor_MaxRange  : Real;       // 传感器有效范围上限 (如 +50.0)
+      rSensor_DiffLimit : Real;       // 双传感器允许温差 (如 5.0 degC)
+
+      // === 控制状态 ===
+      bCooling_Demand   : Bool;       // 制冷需求信号 (温度控制输出)
+      bLast_Demand      : Bool;       // 上一次制冷需求 (上升沿检测)
+      bSystem_Enable    : Bool;       // 系统使能 (总开关)
+
+      // === 传感器诊断 ===
+      bSensor1_Fault    : Bool;       // 传感器1故障
+      bSensor2_Fault    : Bool;       // 传感器2故障
+      bSensor_Fault     : Bool;       // 传感器整体故障 (双传感器均故障)
+      bSensor_Warning   : Bool;       // 传感器预警 (温差过大)
+
+      // === 报警状态 ===
+      bTemp_Alarm       : Bool;       // 超温报警
+      bComm_Fault       : Bool;       // 与主站通信故障
+      bEmergency_Stop   : Bool;       // 急停信号
+
+      // === 化霜控制 ===
+      bDefrost_Active   : Bool;       // 化霜进行中
+      bDefrost_Heater   : Bool;       // 化霜加热器输出
+      iDefrost_State    : Int;        // 化霜状态机 (0=待机,1=化霜,2=排水)
+      tDefrost_Interval : Time;       // 化霜间隔计时器
+      tDefrost_Timer    : Time;       // 化霜持续计时器
+      tDefrost_Cycle    : Time;       // 化霜周期设定 (如 T#6h)
+      tDefrost_Duration : Time;       // 化霜最长时间 (如 T#30m)
+      tDefrost_Drain    : Time;       // 化霜后排水时间 (如 T#5m)
+      rDefrost_EndTemp  : Real;       // 化霜终止温度 (如 10.0 degC)
+
+      // === 分组启动 ===
+      iStart_Phase      : Int;        // 启动阶段 (0=空闲,1-3=分组启动,4-5=分组停止)
+      tGroup_Timer      : Time;       // 分组延时计时器
+      tGroup_Delay      : Time;       // 分组间隔时间设定 (如 T#5s)
+      aRotationOrder    : Array[1..10] of Int;  // 轮换优先级表 (存压缩机编号)
+
+      // === 压缩机数组 ===
+      aCompressor       : Array[1..10] of "UDT_Compressor";  // 10台压缩机
+
+      // === 统计信息 ===
+      iActive_Count     : Int;        // 当前运行台数
+      iFault_Count      : Int;        // 故障台数
+      iAvailable_Count  : Int;        // 可用台数 (未故障未隔离)
+
+      // === 通信数据 (与S7-1500交换) ===
+      wAlarm_Word       : Word;       // 报警状态字 (位编码)
+      wStatus_Word      : Word;       // 运行状态字 (位编码)
+   END_STRUCT;
+END_TYPE
