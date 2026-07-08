@@ -1,0 +1,152 @@
+{Scl_export_offset 0}
+// ============================================================
+// OB35 - 循环中断组织块 (100ms)
+// 冷库温度控制系统 - S7-1200 冷库控制器
+// ============================================================
+// 功能:
+//   每100ms执行一次, 用于:
+//   1. 读取模拟量输入 (PT100温度传感器)
+//   2. 读取数字量输入 (运行反馈/过载信号/急停)
+//   3. 温度信号滤波 (滑动平均)
+//   4. 通信看门狗 (检测与主站通信是否正常)
+// ============================================================
+// 注: OB35 优先级高于 OB1, 用于时间关键的任务
+//     温度采集放在OB35确保固定采样周期
+// ============================================================
+
+ORGANIZATION_BLOCK "OB35"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_TEMP
+      // 临时变量
+      rRawTemp1         : Real;       // 传感器1原始读数
+      rRawTemp2         : Real;       // 传感器2原始读数
+      rRawEvap          : Real;       // 蒸发器温度原始读数
+   END_VAR
+
+   VAR
+      // 滑动平均滤波缓冲区 (5点平均)
+      aTemp1Buffer      : Array[1..5] of Real;   // 传感器1滤波缓冲
+      aTemp2Buffer      : Array[1..5] of Real;   // 传感器2滤波缓冲
+      iFilterIndex      : Int;                    // 滤波缓冲区索引
+      iCommCounter      : Int;                    // 通信计数器 (看门狗)
+      bCommFaultLatched : Bool;                   // 通信故障锁存
+
+      // 通信看门狗
+      // 主站正常通信时定期清零此计数器
+      // 超过阈值视为通信故障
+   END_VAR
+
+BEGIN
+
+   // ================================================================
+   // 1. 读取模拟量输入 (PT100温度传感器)
+   //    假设硬件配置:
+   //      PIW256 → 传感器1 (库温主)
+   //      PIW258 → 传感器2 (库温备)
+   //      PIW260 → 蒸发器温度
+   //    实际地址根据硬件配置调整
+   // ================================================================
+
+   // 读取原始模拟量值并转换为温度 (degC)
+   // PT100 模拟量模块通常配置为直接输出温度值
+   // 如使用NORM_X + SCALE_X指令进行线性变换
+   // 简化示例: 假设模块已配置为直接输出温度
+
+   rRawTemp1 := "AI_Temp_Sensor1";  // 物理输入: 库温传感器1
+   rRawTemp2 := "AI_Temp_Sensor2";  // 物理输入: 库温传感器2
+   rRawEvap  := "AI_Evap_Temp";     // 物理输入: 蒸发器温度
+
+   // ================================================================
+   // 2. 滑动平均滤波 (5点)
+   //    消除温度信号噪声, 提高控制稳定性
+   // ================================================================
+   iFilterIndex := iFilterIndex + 1;
+   IF iFilterIndex > 5 THEN
+      iFilterIndex := 1;
+   END_IF;
+
+   aTemp1Buffer[iFilterIndex] := rRawTemp1;
+   aTemp2Buffer[iFilterIndex] := rRawTemp2;
+
+   // 计算5点滑动平均
+   "DB_ColdRoom".rTemp_Sensor1 := (aTemp1Buffer[1] + aTemp1Buffer[2]
+                                 + aTemp1Buffer[3] + aTemp1Buffer[4]
+                                 + aTemp1Buffer[5]) / 5.0;
+
+   "DB_ColdRoom".rTemp_Sensor2 := (aTemp2Buffer[1] + aTemp2Buffer[2]
+                                 + aTemp2Buffer[3] + aTemp2Buffer[4]
+                                 + aTemp2Buffer[5]) / 5.0;
+
+   "DB_ColdRoom".rEvap_Temp := rRawEvap;
+
+   // ================================================================
+   // 3. 读取数字量输入
+   //    - 急停信号
+   //    - 10台压缩机运行反馈 (接触器辅助触点)
+   //    - 10台压缩机过载信号 (热继电器)
+   // ================================================================
+
+   // 急停信号
+   "DB_ColdRoom".bEmergency_Stop := "DI_Emergency_Stop";
+
+   // 10台压缩机运行反馈和过载信号
+   // (实际地址根据硬件配置)
+   "DB_ColdRoom".aCompressor[1].bRun_Feedback := "DI_Comp1_Feedback";
+   "DB_ColdRoom".aCompressor[1].bOverload     := "DI_Comp1_Overload";
+   "DB_ColdRoom".aCompressor[2].bRun_Feedback := "DI_Comp2_Feedback";
+   "DB_ColdRoom".aCompressor[2].bOverload     := "DI_Comp2_Overload";
+   "DB_ColdRoom".aCompressor[3].bRun_Feedback := "DI_Comp3_Feedback";
+   "DB_ColdRoom".aCompressor[3].bOverload     := "DI_Comp3_Overload";
+   "DB_ColdRoom".aCompressor[4].bRun_Feedback := "DI_Comp4_Feedback";
+   "DB_ColdRoom".aCompressor[4].bOverload     := "DI_Comp4_Overload";
+   "DB_ColdRoom".aCompressor[5].bRun_Feedback := "DI_Comp5_Feedback";
+   "DB_ColdRoom".aCompressor[5].bOverload     := "DI_Comp5_Overload";
+   "DB_ColdRoom".aCompressor[6].bRun_Feedback := "DI_Comp6_Feedback";
+   "DB_ColdRoom".aCompressor[6].bOverload     := "DI_Comp6_Overload";
+   "DB_ColdRoom".aCompressor[7].bRun_Feedback := "DI_Comp7_Feedback";
+   "DB_ColdRoom".aCompressor[7].bOverload     := "DI_Comp7_Overload";
+   "DB_ColdRoom".aCompressor[8].bRun_Feedback := "DI_Comp8_Feedback";
+   "DB_ColdRoom".aCompressor[8].bOverload     := "DI_Comp8_Overload";
+   "DB_ColdRoom".aCompressor[9].bRun_Feedback := "DI_Comp9_Feedback";
+   "DB_ColdRoom".aCompressor[9].bOverload     := "DI_Comp9_Overload";
+   "DB_ColdRoom".aCompressor[10].bRun_Feedback := "DI_Comp10_Feedback";
+   "DB_ColdRoom".aCompressor[10].bOverload     := "DI_Comp10_Overload";
+
+   // ================================================================
+   // 4. 物理输出: 压缩机运行命令 → 接触器线圈
+   // ================================================================
+   "DO_Comp1_Run"  := "DB_ColdRoom".aCompressor[1].bRun_Cmd;
+   "DO_Comp2_Run"  := "DB_ColdRoom".aCompressor[2].bRun_Cmd;
+   "DO_Comp3_Run"  := "DB_ColdRoom".aCompressor[3].bRun_Cmd;
+   "DO_Comp4_Run"  := "DB_ColdRoom".aCompressor[4].bRun_Cmd;
+   "DO_Comp5_Run"  := "DB_ColdRoom".aCompressor[5].bRun_Cmd;
+   "DO_Comp6_Run"  := "DB_ColdRoom".aCompressor[6].bRun_Cmd;
+   "DO_Comp7_Run"  := "DB_ColdRoom".aCompressor[7].bRun_Cmd;
+   "DO_Comp8_Run"  := "DB_ColdRoom".aCompressor[8].bRun_Cmd;
+   "DO_Comp9_Run"  := "DB_ColdRoom".aCompressor[9].bRun_Cmd;
+   "DO_Comp10_Run" := "DB_ColdRoom".aCompressor[10].bRun_Cmd;
+
+   // 化霜加热器输出
+   "DO_Defrost_Heater" := "DB_ColdRoom".bDefrost_Heater;
+
+   // 报警蜂鸣器输出
+   "DO_Alarm_Horn" := "FB_SafetyAlarm".bAlarmHorn;
+
+   // ================================================================
+   // 5. 通信看门狗
+   //    主站(S7-1500)正常通信时会定期复位此计数器
+   //    如果超过10秒(100个周期)未收到主站通信 → 通信故障
+   // ================================================================
+   iCommCounter := iCommCounter + 1;
+
+   IF iCommCounter >= 100 THEN
+      // 10秒未通信 → 通信故障
+      "DB_ColdRoom".bComm_Fault := TRUE;
+   END_IF;
+
+   // 主站通信正常时通过其他逻辑复位 iCommCounter 和 bComm_Fault
+   // (在接收到主站数据的FB中处理)
+
+END_ORGANIZATION_BLOCK
