@@ -1,0 +1,124 @@
+// ============================================================
+// WinCC 变量表定义
+// 冷库温度控制系统 - WinCC 上位机
+// ============================================================
+// 连接方式: WinCC 通过 PROFINET 连接 S7-1500 (IP: 192.168.0.1)
+// 通信驱动: SIMATIC S7 Protocol Suite -> TCP/IP
+// 变量来源: S7-1500 的 DB_GlobalData 数据块
+// ============================================================
+//
+// 变量命名规则:
+//   Room[n]_变量名  - 第n个冷库的变量
+//   Global_变量名   - 全局变量
+//
+// 数据类型对应:
+//   PLC Bool  → WinCC Bool
+//   PLC Int   → WinCC Signed 16-bit
+//   PLC DInt  → WinCC Signed 32-bit
+//   PLC Real  → WinCC Floating-point 32-bit
+//   PLC Word  → WinCC Unsigned 16-bit
+//   PLC Time  → WinCC Signed 32-bit (ms)
+// ============================================================
+
+
+// ============================================================
+// 一、连接配置
+// ============================================================
+// 连接名称: S7-1500_Connection
+// 驱动: SIMATIC S7 Protocol Suite
+// 通道: TCP/IP
+// 目标IP: 192.168.0.1
+// 机架号: 0
+// 槽号: 1
+// 连接资源: 1
+
+
+// ============================================================
+// 二、全局变量 (Global)
+// ============================================================
+// 变量名                    | PLC地址                    | 数据类型 | 说明
+// --------------------------|---------------------------|---------|------------------
+// Global_TotalActive        | DB_GlobalData.iTotalActive    | Int    | 全系统运行压缩机总数
+// Global_TotalFault         | DB_GlobalData.iTotalFault     | Int    | 全系统故障压缩机总数
+// Global_TotalAvailable     | DB_GlobalData.iTotalAvailable | Int    | 全系统可用压缩机总数
+// Global_Alarm              | DB_GlobalData.bGlobalAlarm    | Bool   | 全局报警
+// Global_CriticalAlarm      | DB_GlobalData.bGlobalCritical | Bool   | 全局严重报警
+// Global_AlarmRoomCount     | DB_GlobalData.iAlarmRoomCount | Int    | 报警冷库数量
+// Global_Status             | (FB_DataCollect.wGlobalStatus)| Word   | 全局状态字
+
+
+// ============================================================
+// 三、各冷库变量 (Room 1-9, 以Room1为例, 其余类似)
+// ============================================================
+// --- 温度数据 (只读, 来自PLC) ---
+// 变量名                        | PLC地址                                 | 数据类型 | 单位
+// ------------------------------|----------------------------------------|---------|------
+// Room1_Temp_Sensor1            | DB_GlobalData.aRoom[1].rTemp_Sensor1   | Real    | degC
+// Room1_Temp_Sensor2            | DB_GlobalData.aRoom[1].rTemp_Sensor2   | Real    | degC
+// Room1_Temp_Actual             | DB_GlobalData.aRoom[1].rTemp_Actual    | Real    | degC
+// Room1_Evap_Temp               | DB_GlobalData.aRoom[1].rEvap_Temp      | Real    | degC
+
+// --- 温度设定 (读写, 操作员可修改) ---
+// Room1_Temp_HighLimit          | DB_GlobalData.aRoom[1].rTemp_HighLimit | Real    | degC
+// Room1_Temp_LowLimit           | DB_GlobalData.aRoom[1].rTemp_LowLimit  | Real    | degC
+// Room1_Temp_AlarmHigh          | DB_GlobalData.aRoom[1].rTemp_AlarmHigh | Real    | degC
+
+// --- 运行状态 (只读) ---
+// Room1_Cooling_Demand          | DB_GlobalData.aRoom[1].bCooling_Demand | Bool    | -
+// Room1_Defrost_Active          | DB_GlobalData.aRoom[1].bDefrost_Active | Bool    | -
+// Room1_System_Enable           | DB_GlobalData.aRoom[1].bSystem_Enable  | Bool    | - (读写)
+// Room1_Emergency_Stop          | DB_GlobalData.aRoom[1].bEmergency_Stop | Bool    | - (读写)
+
+// --- 压缩机统计 (只读) ---
+// Room1_Active_Count            | DB_GlobalData.aRoom[1].iActive_Count   | Int     | 台
+// Room1_Fault_Count             | DB_GlobalData.aRoom[1].iFault_Count    | Int     | 台
+// Room1_Available_Count         | DB_GlobalData.aRoom[1].iAvailable_Count| Int     | 台
+// Room1_CompRunning             | DB_GlobalData.aRoom[1].wCompRunning    | Word    | 位编码
+// Room1_CompFault               | DB_GlobalData.aRoom[1].wCompFault      | Word    | 位编码
+
+// --- 报警 (只读) ---
+// Room1_Alarm_Word              | DB_GlobalData.aRoom[1].wAlarm_Word     | Word    | 位编码
+// Room1_Status_Word             | DB_GlobalData.aRoom[1].wStatus_Word    | Word    | 位编码
+// Room1_AnyAlarm                | DB_GlobalData.aRoom[1].bAnyAlarm       | Bool    | -
+// Room1_CriticalAlarm           | DB_GlobalData.aRoom[1].bCriticalAlarm  | Bool    | -
+// Room1_Comm_OK                 | DB_GlobalData.aRoom[1].bComm_OK        | Bool    | -
+
+// --- Room 2-9 变量结构完全相同, 仅替换编号 ---
+// Room2_Temp_Actual             | DB_GlobalData.aRoom[2].rTemp_Actual    | Real    | degC
+// Room3_Temp_Actual             | DB_GlobalData.aRoom[3].rTemp_Actual    | Real    | degC
+// ...
+// Room9_Temp_Actual             | DB_GlobalData.aRoom[9].rTemp_Actual    | Real    | degC
+// (共计 9 × 18 = 162 个冷库变量 + 7 个全局变量 = 169 个变量)
+
+
+// ============================================================
+// 四、报警变量 (WinCC Alarm Logging)
+// ============================================================
+// 报警编号 | 变量名                        | 触发条件              | 优先级 | 说明
+// ---------|------------------------------|----------------------|--------|------------------
+// ALM_001  | Global_CriticalAlarm          | = TRUE (上升沿)       | 高     | 全局严重报警
+// ALM_002  | Global_Alarm                  | = TRUE (上升沿)       | 中     | 全局报警
+// ALM_101  | Room1_AnyAlarm                | = TRUE (上升沿)       | 中     | 冷库1报警
+// ALM_102  | Room2_AnyAlarm                | = TRUE (上升沿)       | 中     | 冷库2报警
+// ...      | ...                           | ...                  | ...    | ...
+// ALM_109  | Room9_AnyAlarm                | = TRUE (上升沿)       | 中     | 冷库9报警
+// ALM_201  | Room1_Alarm_Word.Bit0         | = 1 (超温)            | 高     | 冷库1超温报警
+// ALM_202  | Room1_Alarm_Word.Bit3         | = 1 (双传感器故障)     | 高     | 冷库1传感器故障
+// ALM_203  | Room1_Alarm_Word.Bit5         | = 1 (压缩机故障)      | 中     | 冷库1压缩机故障
+// ALM_204  | Room1_Alarm_Word.Bit8         | = 1 (急停)            | 紧急   | 冷库1急停
+// ALM_205  | Room1_Alarm_Word.Bit10        | = 1 (可用不足)        | 高     | 冷库1可用压缩机不足
+// (冷库2-9报警类推, 编号 ALM_301~ALM_909)
+
+
+// ============================================================
+// 五、数据归档变量 (WinCC Tag Logging)
+// ============================================================
+// 归档变量                  | 采样周期 | 归档周期 | 说明
+// -------------------------|---------|---------|------------------
+// Room1_Temp_Actual         | 1分钟   | 30天    | 冷库1温度趋势
+// Room2_Temp_Actual         | 1分钟   | 30天    | 冷库2温度趋势
+// ...                       | ...     | ...     | ...
+// Room9_Temp_Actual         | 1分钟   | 30天    | 冷库9温度趋势
+// Room1_Active_Count        | 10分钟  | 90天    | 冷库1运行台数
+// Global_TotalActive        | 10分钟  | 90天    | 全系统运行台数
+// Global_TotalFault         | 事件触发| 365天   | 故障记录
