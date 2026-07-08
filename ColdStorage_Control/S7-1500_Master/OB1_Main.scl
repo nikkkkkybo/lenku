@@ -1,0 +1,60 @@
+{Scl_export_offset 0}
+// ============================================================
+// OB1 - S7-1500 主站主循环组织块
+// 冷库温度控制系统 - S7-1500 主站
+// ============================================================
+// 功能:
+//   1. 调用 FB_S7Communication 轮询9个S7-1200从站
+//   2. 调用 FB_DataCollect 汇总全局数据
+//   3. 为WinCC提供数据接口
+// ============================================================
+
+ORGANIZATION_BLOCK "OB1"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_TEMP
+      // 临时变量
+   END_VAR
+
+BEGIN
+
+   // ================================================================
+   // 1. S7通信管理 - 轮询9个S7-1200从站
+   //    读取各冷库运行数据, 写入参数设定
+   // ================================================================
+   "FB_S7Communication"(
+      bEnable       := TRUE,
+      tPollInterval := T#100ms
+   );
+
+   // ================================================================
+   // 2. 数据汇总 - 汇总9个冷库状态
+   //    计算全局统计, 生成报警摘要
+   // ================================================================
+   "FB_DataCollect"(
+      bEnable := TRUE
+   );
+
+   // ================================================================
+   // 3. WinCC接口
+   //    WinCC通过PROFINET直接读取 DB_GlobalData 中的变量
+   //    无需额外代码, WinCC变量表配置连接到DB_GlobalData即可
+   // ================================================================
+   // WinCC 读取的主要变量:
+   //   - DB_GlobalData.aRoom[1..9].rTemp_Actual    (各库温度)
+   //   - DB_GlobalData.aRoom[1..9].bCooling_Demand (各库制冷状态)
+   //   - DB_GlobalData.aRoom[1..9].iActive_Count   (各库运行台数)
+   //   - DB_GlobalData.aRoom[1..9].wAlarm_Word     (各库报警字)
+   //   - DB_GlobalData.iTotalActive                (全局运行台数)
+   //   - DB_GlobalData.bGlobalAlarm                (全局报警)
+   //   - DB_GlobalData.wGlobalStatus               (全局状态字)
+
+   // WinCC 写入的主要变量 (操作员设定):
+   //   - DB_GlobalData.aRoom[1..9].rTemp_HighLimit (温度上限)
+   //   - DB_GlobalData.aRoom[1..9].rTemp_LowLimit  (温度下限)
+   //   - DB_GlobalData.aRoom[1..9].rTemp_AlarmHigh (报警温度)
+   //   - DB_GlobalData.aRoom[1..9].bSystem_Enable  (系统使能)
+   //   - DB_GlobalData.aRoom[1..9].bEmergency_Stop (远程急停)
+
+END_ORGANIZATION_BLOCK
