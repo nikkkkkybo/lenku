@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>冷库温度控制系统 - 一体化监控平台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0d1b2a;--panel:#152232;--card:#1b2d3f;--border:#2a4055;--text:#e0e6ed;--muted:#7a8a99;--blue:#3498db;--green:#2ecc71;--orange:#e67e22;--red:#e74c3c;--yellow:#f1c40f;--gray:#555}
+body{background:var(--bg);color:var(--text);font-family:"Microsoft YaHei","PingFang SC",sans-serif;font-size:14px;overflow-x:hidden}
+/* ====== 顶栏 ====== */
+.topbar{background:linear-gradient(135deg,#0f3057,#16537e);padding:0 20px;height:56px;display:flex;align-items:center;gap:20px;box-shadow:0 2px 12px rgba(0,0,0,.4);position:sticky;top:0;z-index:100}
+.topbar .logo{font-size:20px;font-weight:bold;color:#fff;white-space:nowrap}
+.topbar .logo span{margin-right:6px}
+.topbar .stats{display:flex;gap:16px;margin-left:auto}
+.topbar .stat{text-align:center;min-width:70px}
+.topbar .stat .v{font-size:18px;font-weight:bold}
+.topbar .stat .l{font-size:11px;color:var(--muted)}
+.topbar .stat .v.green{color:var(--green)} .topbar .stat .v.red{color:var(--red)} .topbar .stat .v.blue{color:var(--blue)} .topbar .stat .v.yellow{color:var(--yellow)}
+.topbar .badge{background:rgba(255,255,255,.15);padding:4px 14px;border-radius:14px;font-size:12px;color:#fff}
+.topbar .badge.mock{background:var(--blue)}
+.topbar .clock{color:var(--muted);font-size:13px;font-family:monospace}
+/* ====== 主体布局 ====== */
+.main{display:grid;grid-template-columns:1fr 480px;gap:12px;padding:12px;height:calc(100vh - 56px);overflow:hidden}
+/* ====== 左侧:冷库总览 ====== */
+.left-panel{overflow-y:auto;display:flex;flex-direction:column;gap:12px}
+.section-title{font-size:15px;font-weight:bold;color:var(--blue);padding:4px 0;display:flex;align-items:center;gap:8px}
+.section-title .dot{width:8px;height:8px;border-radius:50%;background:var(--blue)}
+.room-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.room-card{background:var(--card);border:2px solid var(--border);border-radius:10px;padding:14px;cursor:pointer;transition:all .2s;position:relative;overflow:hidden}
+.room-card:hover{border-color:var(--blue);transform:translateY(-2px)}
+.room-card.selected{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue),0 4px 16px rgba(52,152,219,.3)}
+.room-card.alarm{border-color:var(--red);animation:pulse-border 2s infinite}
+@keyframes pulse-border{0%,100%{box-shadow:0 0 4px var(--red)}50%{box-shadow:0 0 12px var(--red)}}
+.room-card .rid{font-size:13px;color:var(--muted)}
+.room-card .rid b{color:var(--text);font-size:15px}
+.room-card .temp{font-size:32px;font-weight:bold;margin:4px 0;font-family:monospace}
+.room-card .temp .unit{font-size:14px;color:var(--muted)}
+.room-card .stbar{display:flex;align-items:center;gap:6px;margin-bottom:8px}
+.room-card .stbar .sd{width:8px;height:8px;border-radius:50%}
+.room-card .stbar .st{font-size:12px}
+.room-card .comps{display:flex;gap:3px;flex-wrap:wrap}
+.room-card .comp{width:18px;height:18px;border-radius:4px;background:var(--gray);display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff}
+.room-card .comp.run{background:var(--green)} .room-card .comp.fault{background:var(--red)} .room-card .comp.iso{background:#333}
+.room-card .meta{display:flex;justify-content:space-between;margin-top:6px;font-size:11px;color:var(--muted)}
+.room-card .meta b{color:var(--text)}
+/* ====== 报警面板 ====== */
+.alarm-panel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;max-height:200px;overflow-y:auto}
+.alarm-panel:empty::after{content:"暂无报警";color:var(--muted);display:block;text-align:center;padding:16px}
+.alarm-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;margin-bottom:4px;background:rgba(231,76,60,.1);border-left:3px solid var(--red)}
+.alarm-item .ico{font-size:18px}
+.alarm-item .info{flex:1}
+.alarm-item .info .t{font-weight:bold;font-size:13px}
+.alarm-item .info .d{font-size:11px;color:var(--muted)}
+.alarm-item .ack{background:var(--orange);border:none;color:#fff;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px}
+.alarm-item .ack:hover{opacity:.85}
+/* ====== 右侧:详情面板 ====== */
+.right-panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow-y:auto;display:flex;flex-direction:column}
+.right-panel .empty{display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:16px}
+.detail-header{padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
+.detail-header .icon{font-size:28px}
+.detail-header .title{font-size:18px;font-weight:bold}
+.detail-header .sub{font-size:12px;color:var(--muted)}
+.detail-header .status-tag{margin-left:auto;padding:4px 12px;border-radius:12px;font-size:12px;font-weight:bold}
+.detail-body{padding:14px 16px;display:flex;flex-direction:column;gap:14px}
+/* 温度区域 */
+.temp-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.temp-box{background:var(--card);border-radius:8px;padding:10px;text-align:center}
+.temp-box .l{font-size:11px;color:var(--muted);margin-bottom:4px}
+.temp-box .v{font-size:22px;font-weight:bold;font-family:monospace}
+.temp-box .v .u{font-size:12px;color:var(--muted)}
+.temp-box.main{border:1px solid var(--blue)}
+.temp-box.main .v{color:var(--blue)}
+/* 参数设置 */
+.params-row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.param-box{background:var(--card);border-radius:8px;padding:10px;text-align:center}
+.param-box .l{font-size:11px;color:var(--muted);margin-bottom:4px}
+.param-box input{width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:4px 8px;font-size:16px;font-family:monospace;text-align:center}
+.param-box input:focus{border-color:var(--blue);outline:none}
+.btn-save{background:var(--blue);color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-size:13px;margin-top:8px;width:100%}
+.btn-save:hover{background:#2980b9}
+/* 压缩机列表 */
+.comp-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px}
+.comp-item{background:var(--card);border-radius:6px;padding:8px 4px;text-align:center;position:relative}
+.comp-item .cn{font-size:11px;color:var(--muted)}
+.comp-item .ci{font-size:20px;margin:2px 0}
+.comp-item .cs{font-size:10px;font-weight:bold}
+.comp-item.run{border:1px solid var(--green)} .comp-item.run .cs{color:var(--green)}
+.comp-item.fault{border:1px solid var(--red)} .comp-item.fault .cs{color:var(--red)}
+.comp-item.idle{border:1px solid var(--border)} .comp-item.idle .cs{color:var(--muted)}
+.comp-item.iso{border:1px solid #333;opacity:.5} .comp-item.iso .cs{color:#555}
+/* 趋势图 */
+.chart-box{background:var(--card);border-radius:8px;padding:10px}
+.chart-box canvas{width:100%;height:140px;display:block}
+/* 控制按钮 */
+.ctrl-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.ctrl-btn{padding:10px 4px;border:none;border-radius:6px;cursor:pointer;font-size:12px;font-weight:bold;color:#fff;transition:all .15s}
+.ctrl-btn:hover{opacity:.88;transform:translateY(-1px)}
+.ctrl-btn.enable{background:var(--green)} .ctrl-btn.estop{background:var(--red)}
+.ctrl-btn.defrost{background:var(--orange)} .ctrl-btn.ack{background:var(--yellow);color:#333}
+.ctrl-btn:disabled{opacity:.4;cursor:not-allowed;transform:none}
+/* ====== 通用 ====== */
+.green{color:var(--green)} .red{color:var(--red)} .blue{color:var(--blue)} .orange{color:var(--orange)} .yellow{color:var(--yellow)} .muted{color:var(--muted)}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:#3a5065}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--card);border:1px solid var(--blue);color:var(--text);padding:12px 24px;border-radius:8px;font-size:14px;z-index:999;box-shadow:0 4px 16px rgba(0,0,0,.4);animation:fadein .3s}
+.toast.err{border-color:var(--red)}
+.toast.ok{border-color:var(--green)}
+@keyframes fadein{from{opacity:0;transform:translateX(-50%) translateY(10px)}to{opacity:1}}
+</style>
+</head>
+<body>
+
+<!-- ====== 顶栏 ====== -->
+<div class="topbar">
+    <div class="logo"><span>❄</span>冷库温度控制系统</div>
+    <div class="badge mock" id="mode-badge">模拟模式</div>
+    <div class="clock" id="clock">--:--:--</div>
+    <div class="stats" id="global-stats">
+        <div class="stat"><div class="v green" id="g-active">0</div><div class="l">运行中</div></div>
+        <div class="stat"><div class="v red" id="g-fault">0</div><div class="l">故障</div></div>
+        <div class="stat"><div class="v blue" id="g-avail">0</div><div class="l">可用</div></div>
+        <div class="stat"><div class="v yellow" id="g-alarm">0</div><div class="l">报警库</div></div>
+    </div>
+</div>
+
+<!-- ====== 主体 ====== -->
+<div class="main">
+    <!-- 左侧 -->
+    <div class="left-panel">
+        <div class="section-title"><span class="dot"></span>冷库总览 (9库 × 10台压缩机)</div>
+        <div class="room-grid" id="room-grid"></div>
+        <div class="section-title"><span class="dot" style="background:var(--red)"></span>实时报警</div>
+        <div class="alarm-panel" id="alarm-panel"></div>
+    </div>
+
+    <!-- 右侧详情 -->
+    <div class="right-panel" id="right-panel">
+        <div class="empty">← 点击左侧冷库卡片查看详情</div>
+    </div>
+</div>
+
+<script>
+// ====== 全局状态 ======
+let selectedRoom = null;
+let refreshTimer = null;
+let chartCtx = null;
+
+const API = '';  // 同源
+const STATUS_COLORS = {
+    '正常':'var(--green)','制冷中':'var(--blue)','化霜中':'var(--orange)',
+    '报警':'var(--yellow)','严重报警':'var(--red)','急停':'var(--red)',
+    '已停用':'var(--muted)','通信故障':'var(--red)'
+};
+const COMP_ICONS = {run:'🟢', idle:'⚪', fault:'🔴', iso:'⚫'};
+
+// ====== 工具函数 ======
+async function api(path, method='GET', body=null) {
+    const opt = {method, headers:{'Content-Type':'application/json'}};
+    if (body) opt.body = JSON.stringify(body);
+    try {
+        const r = await fetch(API + path, opt);
+        if (!r.ok) { const e = await r.json().catch(()=>({detail:r.statusText})); throw new Error(e.detail||r.statusText); }
+        return await r.json();
+    } catch(e) { showToast(e.message, 'err'); throw e; }
+}
+
+function showToast(msg, type='ok') {
+    const t = document.createElement('div');
+    t.className = 'toast ' + type;
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(()=>{ t.style.opacity='0'; t.style.transition='opacity .3s'; setTimeout(()=>t.remove(), 300); }, 2500);
+}
+
+function fmt(n, d=1) { return Number(n).toFixed(d); }
+
+// ====== 时钟 ======
+function updateClock() {
+    const n = new Date();
+    document.getElementById('clock').textContent =
+        `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}:${String(n.getSeconds()).padStart(2,'0')}`;
+}
+setInterval(updateClock, 1000); updateClock();
+
+// ====== 渲染:总览 ======
+async function renderOverview() {
+    try {
+        const d = await api('/api/overview');
+        // 全局统计
+        document.getElementById('g-active').textContent = d.total_active;
+        document.getElementById('g-fault').textContent = d.total_fault;
+        document.getElementById('g-avail').textContent = d.total_available;
+        document.getElementById('g-alarm').textContent = d.alarm_room_count;
+        document.getElementById('mode-badge').textContent = d.mock_mode ? '模拟模式' : '真实模式';
+        document.getElementById('mode-badge').className = 'badge ' + (d.mock_mode ? 'mock' : '');
+        // 房间卡片
+        const grid = document.getElementById('room-grid');
+        const cards = grid.querySelectorAll('.room-card');
+        if (cards.length === 0) {
+            // 首次渲染
+            d.rooms.forEach(r => {
+                const c = document.createElement('div');
+                c.className = 'room-card';
+                c.id = `rc-${r.room_id}`;
+                c.onclick = () => selectRoom(r.room_id);
+                c.innerHTML = `
+                    <div class="rid"><b>${r.room_id}#冷库</b></div>
+                    <div class="temp" id="rc-temp-${r.room_id}">--<span class="unit">°C</span></div>
+                    <div class="stbar"><span class="sd" id="rc-sd-${r.room_id}"></span><span class="st" id="rc-st-${r.room_id}"></span></div>
+                    <div class="comps" id="rc-comps-${r.room_id}"></div>
+                    <div class="meta"><span>运行 <b id="rc-act-${r.room_id}">0</b>/10</span><span>故障 <b id="rc-flt-${r.room_id}">0</b></span></div>
+                `;
+                grid.appendChild(c);
+            });
+        }
+        // 更新数据
+        d.rooms.forEach(r => {
+            const card = document.getElementById(`rc-${r.room_id}`);
+            if (!card) return;
+            document.getElementById(`rc-temp-${r.room_id}`).innerHTML = `${fmt(r.temp_actual)}<span class="unit">°C</span>`;
+            const stEl = document.getElementById(`rc-st-${r.room_id}`);
+            stEl.textContent = r.status_text;
+            stEl.style.color = STATUS_COLORS[r.status_text] || 'var(--muted)';
+            document.getElementById(`rc-sd-${r.room_id}`).style.background = STATUS_COLORS[r.status_text] || 'var(--muted)';
+            document.getElementById(`rc-act-${r.room_id}`).textContent = r.active_count;
+            document.getElementById(`rc-flt-${r.room_id}`).textContent = r.fault_count;
+            card.classList.toggle('alarm', r.any_alarm);
+            card.classList.toggle('selected', r.room_id === selectedRoom);
+        });
+        renderAlarms();
+    } catch(e) { console.error('overview error:', e); }
+}
+
+// ====== 渲染:压缩机迷你指示 ======
+async function renderCompMini(roomId) {
+    try {
+        const r = await api(`/api/rooms/${roomId}`);
+        const el = document.getElementById(`rc-comps-${roomId}`);
+        if (!el) return;
+        el.innerHTML = r.compressors.running_list.map((run, i) => {
+            const fault = r.compressors.fault_list[i];
+            let cls = 'comp';
+            if (fault) cls += ' fault'; else if (run) cls += ' run';
+            return `<div class="${cls}" title="${i+1}#压缩机">${i+1}</div>`;
+        }).join('');
+    } catch(e) {}
+}
+
+// ====== 渲染:报警列表 ======
+async function renderAlarms() {
+    try {
+        const d = await api('/api/alarms');
+        const panel = document.getElementById('alarm-panel');
+        if (d.total_alarms === 0) { panel.innerHTML = ''; return; }
+        panel.innerHTML = d.alarms.map(a => `
+            <div class="alarm-item">
+                <div class="ico">⚠️</div>
+                <div class="info">
+                    <div class="t">${a.room_id}#冷库 - ${a.status_text}</div>
+                    <div class="d">温度: ${fmt(a.temp_actual)}°C | ${(a.details||[]).join(', ')}</div>
+                </div>
+                <button class="ack" onclick="ackAlarm(${a.room_id})">确认</button>
+            </div>
+        `).join('');
+    } catch(e) {}
+}
+
+// ====== 选择冷库 ======
+async function selectRoom(id) {
+    selectedRoom = id;
+    document.querySelectorAll('.room-card').forEach(c => c.classList.remove('selected'));
+    const card = document.getElementById(`rc-${id}`);
+    if (card) card.classList.add('selected');
+    await renderDetail(id);
+    renderCompMini(id);
+}
+
+// ====== 渲染:右侧详情 ======
+async function renderDetail(id) {
+    try {
+        const r = await api(`/api/rooms/${id}`);
+        const panel = document.getElementById('right-panel');
+        const stColor = STATUS_COLORS[r.status.status_text] || 'var(--muted)';
+        panel.innerHTML = `
+            <div class="detail-header">
+                <div class="icon">❄</div>
+                <div>
+                    <div class="title">${id}# 冷库</div>
+                    <div class="sub">10台压缩机 · 双PT100传感器</div>
+                </div>
+                <div class="status-tag" style="background:${stColor};color:#000">${r.status.status_text}</div>
+            </div>
+            <div class="detail-body">
+                <!-- 温度 -->
+                <div>
+                    <div class="section-title" style="font-size:13px"><span class="dot"></span>温度数据</div>
+                    <div class="temp-row">
+                        <div class="temp-box main"><div class="l">实际温度</div><div class="v">${fmt(r.temperature.actual)}<span class="u">°C</span></div></div>
+                        <div class="temp-box"><div class="l">传感器1</div><div class="v">${fmt(r.temperature.sensor1)}<span class="u">°C</span></div></div>
+                        <div class="temp-box"><div class="l">传感器2</div><div class="v">${fmt(r.temperature.sensor2)}<span class="u">°C</span></div></div>
+                        <div class="temp-box"><div class="l">蒸发器</div><div class="v">${fmt(r.temperature.evaporator)}<span class="u">°C</span></div></div>
+                    </div>
+                </div>
+                <!-- 参数 -->
+                <div>
+                    <div class="section-title" style="font-size:13px"><span class="dot" style="background:var(--orange)"></span>温度设定 (可修改)</div>
+                    <div class="params-row">
+                        <div class="param-box"><div class="l">启动上限</div><input type="number" id="p-high" value="${r.settings.high_limit}" step="0.5"></div>
+                        <div class="param-box"><div class="l">停止下限</div><input type="number" id="p-low" value="${r.settings.low_limit}" step="0.5"></div>
+                        <div class="param-box"><div class="l">报警值</div><input type="number" id="p-alarm" value="${r.settings.alarm_high}" step="0.5"></div>
+                    </div>
+                    <button class="btn-save" onclick="saveParams(${id})">保存参数</button>
+                </div>
+                <!-- 压缩机 -->
+                <div>
+                    <div class="section-title" style="font-size:13px"><span class="dot" style="background:var(--green)"></span>压缩机状态 (运行 ${r.compressors.active_count} / 故障 ${r.compressors.fault_count} / 可用 ${r.compressors.available_count})</div>
+                    <div class="comp-grid" id="comp-grid">
+                        ${r.compressors.running_list.map((run, i) => {
+                            const fault = r.compressors.fault_list[i];
+                            let cls = 'idle', icon = '⚪', st = '待机';
+                            if (fault) { cls = 'fault'; icon = '🔴'; st = '故障'; }
+                            else if (run) { cls = 'run'; icon = '🟢'; st = '运行'; }
+                            return `<div class="comp-item ${cls}"><div class="cn">${i+1}#</div><div class="ci">${icon}</div><div class="cs">${st}</div></div>`;
+                        }).join('')}
+                    </div>
+                </div>
+                <!-- 趋势图 -->
+                <div>
+                    <div class="section-title" style="font-size:13px"><span class="dot" style="background:var(--yellow)"></span>温度趋势 (近60秒)</div>
+                    <div class="chart-box"><canvas id="trend-chart" width="440" height="140"></canvas></div>
+                </div>
+                <!-- 控制按钮 -->
+                <div>
+                    <div class="section-title" style="font-size:13px"><span class="dot" style="background:var(--red)"></span>控制操作</div>
+                    <div class="ctrl-row">
+                        <button class="ctrl-btn enable" onclick="sendCtrl(${id},true,false)">${r.status.system_enable ? '已启用 ✓' : '启用系统'}</button>
+                        <button class="ctrl-btn estop" onclick="sendCtrl(${id},false,true)">${r.status.emergency_stop ? '已急停 ✓' : '紧急停止'}</button>
+                        <button class="ctrl-btn defrost" onclick="doDefrost(${id})">触发化霜</button>
+                        <button class="ctrl-btn ack" onclick="ackAlarm(${id})">确认报警</button>
+                    </div>
+                </div>
+                <!-- 通信 -->
+                <div style="font-size:12px;color:var(--muted);text-align:center">
+                    通信状态: ${r.communication.comm_ok ? '✓ 正常' : '✗ 故障'} | 通信计数: ${r.communication.comm_counter}
+                </div>
+            </div>
+        `;
+        await renderTrend(id);
+    } catch(e) { console.error('detail error:', e); }
+}
+
+// ====== 趋势图绘制 ======
+async function renderTrend(id) {
+    try {
+        const d = await api(`/api/trends/${id}?points=60`);
+        const canvas = document.getElementById('trend-chart');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const W = canvas.width, H = canvas.height;
+        const pts = d.points;
+        ctx.clearRect(0, 0, W, H);
+        if (pts.length < 2) { ctx.fillStyle='#7a8a99'; ctx.font='14px sans-serif'; ctx.textAlign='center'; ctx.fillText('数据不足', W/2, H/2); return; }
+        // 温度范围
+        const temps = pts.map(p => p.temperature);
+        let minT = Math.min(...temps) - 2, maxT = Math.max(...temps) + 2;
+        if (maxT - minT < 4) { const mid = (minT+maxT)/2; minT = mid-2; maxT = mid+2; }
+        const pad = 30, padR = 10, padT = 10, padB = 25;
+        const cw = W - pad - padR, ch = H - padT - padB;
+        // 网格
+        ctx.strokeStyle = '#2a4055'; ctx.lineWidth = 1; ctx.font = '10px monospace'; ctx.fillStyle = '#7a8a99';
+        for (let i = 0; i <= 4; i++) {
+            const y = padT + ch * i / 4;
+            ctx.beginPath(); ctx.moveTo(pad, y); ctx.lineTo(W - padR, y); ctx.stroke();
+            const tv = maxT - (maxT - minT) * i / 4;
+            ctx.textAlign = 'right'; ctx.fillText(tv.toFixed(1) + '°', pad - 4, y + 3);
+        }
+        // 时间标签
+        ctx.textAlign = 'center';
+        [0, Math.floor(pts.length/2), pts.length-1].forEach(i => {
+            if (pts[i]) ctx.fillText(pts[i].timestamp, pad + cw * i / (pts.length-1), H - 8);
+        });
+        // 温度线
+        ctx.strokeStyle = '#3498db'; ctx.lineWidth = 2; ctx.beginPath();
+        pts.forEach((p, i) => {
+            const x = pad + cw * i / (pts.length - 1);
+            const y = padT + ch * (maxT - p.temperature) / (maxT - minT);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        // 填充
+        ctx.lineTo(pad + cw, padT + ch); ctx.lineTo(pad, padT + ch); ctx.closePath();
+        ctx.fillStyle = 'rgba(52,152,219,0.1)'; ctx.fill();
+        // 最新点
+        const last = pts[pts.length - 1];
+        const lx = pad + cw, ly = padT + ch * (maxT - last.temperature) / (maxT - minT);
+        ctx.fillStyle = '#3498db'; ctx.beginPath(); ctx.arc(lx, ly, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#e0e6ed'; ctx.textAlign = 'right'; ctx.font = 'bold 12px monospace';
+        ctx.fillText(last.temperature.toFixed(1) + '°C', lx - 6, ly - 8);
+    } catch(e) { console.error('trend error:', e); }
+}
+
+// ====== 操作函数 ======
+async function saveParams(id) {
+    const high = parseFloat(document.getElementById('p-high').value);
+    const low = parseFloat(document.getElementById('p-low').value);
+    const alarm = parseFloat(document.getElementById('p-alarm').value);
+    if (high <= low) { showToast('温度上限必须大于下限', 'err'); return; }
+    try {
+        await api(`/api/rooms/${id}/params`, 'PUT', {high_limit: high, low_limit: low, alarm_high: alarm});
+        showToast(`${id}#冷库参数已保存`);
+    } catch(e) {}
+}
+
+async function sendCtrl(id, enable, estop) {
+    const body = {};
+    if (enable !== null) body.system_enable = enable;
+    if (estop !== null) body.emergency_stop = estop;
+    try {
+        await api(`/api/rooms/${id}/control`, 'POST', body);
+        const act = enable ? '已启用' : (estop ? '已急停' : '操作完成');
+        showToast(`${id}#冷库 ${act}`);
+        setTimeout(() => renderDetail(id), 500);
+    } catch(e) {}
+}
+
+async function doDefrost(id) {
+    try {
+        await api(`/api/rooms/${id}/defrost`, 'POST');
+        showToast(`${id}#冷库化霜已触发`);
+        setTimeout(() => renderDetail(id), 500);
+    } catch(e) {}
+}
+
+async function ackAlarm(id) {
+    try {
+        await api('/api/alarms/ack', 'POST', {room_id: id});
+        showToast(`${id}#冷库报警已确认`);
+        renderAlarms();
+    } catch(e) {}
+}
+
+// ====== 自动刷新 ======
+function startRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(async () => {
+        await renderOverview();
+        if (selectedRoom) {
+            await renderDetail(selectedRoom);
+            renderCompMini(selectedRoom);
+        }
+    }, 3000);
+}
+
+// ====== 启动 ======
+(async function init() {
+    await renderOverview();
+    // 首次加载渲染所有压缩机迷你指示
+    for (let i = 1; i <= 9; i++) renderCompMini(i);
+    startRefresh();
+})();
+</script>
+</body>
+</html>
