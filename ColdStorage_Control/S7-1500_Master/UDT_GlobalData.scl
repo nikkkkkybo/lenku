@@ -1,0 +1,70 @@
+{Scl_export_offset 0}
+// ============================================================
+// UDT_GlobalData - S7-1500 主站全局数据类型定义
+// 冷库温度控制系统 - S7-1500 主站
+// ============================================================
+// 用于汇总9个冷库的运行数据, 供WinCC监控
+// ============================================================
+
+TYPE "UDT_RoomSummary"
+VERSION : 0.1
+   STRUCT
+      // --- 温度数据 ---
+      rTemp_Sensor1     : Real;       // 主传感器温度
+      rTemp_Sensor2     : Real;       // 备用传感器温度
+      rTemp_Actual      : Real;       // 实际温度
+      rEvap_Temp        : Real;       // 蒸发器温度
+
+      // --- 设定值 ---
+      rTemp_HighLimit   : Real;       // 启动温度上限
+      rTemp_LowLimit    : Real;       // 停止温度下限
+      rTemp_AlarmHigh   : Real;       // 超温报警值
+
+      // --- 运行状态 ---
+      bCooling_Demand   : Bool;       // 制冷需求
+      bDefrost_Active   : Bool;       // 化霜中
+      bSystem_Enable    : Bool;       // 系统使能
+      bEmergency_Stop   : Bool;       // 急停
+
+      // --- 压缩机统计 ---
+      iActive_Count     : Int;        // 运行台数
+      iFault_Count      : Int;        // 故障台数
+      iAvailable_Count  : Int;        // 可用台数
+
+      // --- 10台压缩机运行状态 (位编码) ---
+      wCompRunning      : Word;       // Bit0-9: 1-10号运行状态
+      wCompFault        : Word;       // Bit0-9: 1-10号故障状态
+
+      // --- 报警 ---
+      wAlarm_Word       : Word;       // 报警状态字
+      wStatus_Word      : Word;       // 运行状态字
+      bAnyAlarm         : Bool;       // 有报警
+      bCriticalAlarm    : Bool;       // 严重报警
+
+      // --- 通信状态 ---
+      bComm_OK          : Bool;       // 通信正常
+      iComm_Counter     : Int;        // 通信成功计数器
+   END_STRUCT;
+END_TYPE
+
+
+TYPE "UDT_GlobalData"
+VERSION : 0.1
+   STRUCT
+      // --- 9个冷库汇总数据 ---
+      aRoom             : Array[1..9] of "UDT_RoomSummary";
+
+      // --- 全局统计 ---
+      iTotalActive      : Int;        // 全系统运行压缩机总数
+      iTotalFault       : Int;        // 全系统故障压缩机总数
+      iTotalAvailable   : Int;        // 全系统可用压缩机总数
+      bGlobalAlarm      : Bool;       // 全局报警 (任一库有报警)
+      bGlobalCritical   : Bool;       // 全局严重报警
+      iAlarmRoomCount   : Int;        // 报警冷库数量
+
+      // --- 通信状态 ---
+      iComm_RoomIndex   : Int;        // 当前轮询冷库编号 (1-9)
+      bComm_Busy        : Bool;       // 通信忙
+      tComm_Timer       : Time;       // 通信计时器
+   END_STRUCT;
+END_TYPE
