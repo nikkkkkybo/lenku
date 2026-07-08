@@ -1,0 +1,195 @@
+# ============================================================
+# 冷库温度控制系统 - 后端API使用指南
+# ============================================================
+# 本文档面向开发者, 介绍如何使用后端API接口。
+# 即使没有PLC硬件, 也可以通过模拟模式立即测试所有功能。
+# ============================================================
+
+
+## 一、快速开始 (3步搞定)
+============================================================
+
+### 步骤1: 安装Python
+- 下载 Python 3.9+ (https://www.python.org/downloads/)
+- 安装时勾选 "Add Python to PATH"
+
+### 步骤2: 启动服务
+- 双击运行 start.bat
+- 选择 1 (模拟模式, 无需PLC硬件)
+- 等待出现 "服务启动中..." 提示
+
+### 步骤3: 打开Swagger文档
+- 浏览器访问: http://localhost:8080/docs
+- 在Swagger页面直接点击测试每个接口
+
+
+## 二、API接口一览
+============================================================
+
+序号 | 方法   | 路径                           | 功能
+-----|--------|-------------------------------|------------------
+1    | GET    | /api/overview                  | 全局总览 (9个冷库)
+2    | GET    | /api/rooms                     | 所有冷库列表
+3    | GET    | /api/rooms/{room_id}           | 单库详情
+4    | GET    | /api/rooms/{room_id}/temperature | 单库温度
+5    | PUT    | /api/rooms/{room_id}/params    | 修改温度参数
+6    | POST   | /api/rooms/{room_id}/control   | 控制命令 (使能/急停)
+7    | POST   | /api/rooms/{room_id}/defrost   | 手动化霜
+8    | GET    | /api/alarms                    | 报警列表
+9    | POST   | /api/alarms/ack                | 报警确认
+10   | GET    | /api/trends/{room_id}          | 温度趋势
+11   | GET    | /api/system/status             | 系统状态
+12   | POST   | /api/system/reconnect          | 重连PLC
+
+
+## 三、接口使用示例 (curl命令)
+============================================================
+
+### 1. 全局总览 — 一眼看全部9个冷库状态
+curl http://localhost:8080/api/overview
+
+返回示例:
+{
+  "rooms": [
+    {"room_id": 1, "temp_actual": -18.5, "cooling_demand": true, "active_count": 10, "status_text": "制冷中"},
+    {"room_id": 2, "temp_actual": -19.2, "cooling_demand": false, "active_count": 0, "status_text": "正常"},
+    ...
+  ],
+  "total_active": 58,
+  "total_fault": 0,
+  "global_alarm": false,
+  "mock_mode": true
+}
+
+
+### 2. 单库详情 — 查看冷库1的完整信息
+curl http://localhost:8080/api/rooms/1
+
+返回包含: 温度(双传感器)/设定值/运行状态/10台压缩机状态/报警详情/通信状态
+
+
+### 3. 修改温度参数 — 把冷库1的启动温度改为-15度
+curl -X PUT http://localhost:8080/api/rooms/1/params ^
+  -H "Content-Type: application/json" ^
+  -d "{\"high_limit\": -15.0, \"low_limit\": -20.0}"
+
+Windows PowerShell版本:
+Invoke-RestMethod -Uri "http://localhost:8080/api/rooms/1/params" -Method Put -Body '{"high_limit": -15.0}' -ContentType "application/json"
+
+
+### 4. 远程急停 — 急停冷库3
+curl -X POST http://localhost:8080/api/rooms/3/control ^
+  -H "Content-Type: application/json" ^
+  -d "{\"emergency_stop\": true}"
+
+### 5. 解除急停 — 恢复冷库3运行
+curl -X POST http://localhost:8080/api/rooms/3/control ^
+  -H "Content-Type: application/json" ^
+  -d "{\"emergency_stop\": false}"
+
+### 6. 禁用冷库5 (停止温度控制)
+curl -X POST http://localhost:8080/api/rooms/5/control ^
+  -H "Content-Type: application/json" ^
+  -d "{\"system_enable\": false}"
+
+### 7. 查看报警
+curl http://localhost:8080/api/alarms
+
+### 8. 确认所有报警
+curl -X POST http://localhost:8080/api/alarms/ack ^
+  -H "Content-Type: application/json" ^
+  -d "{}"
+
+### 9. 查看冷库1的温度趋势 (最近60个数据点)
+curl http://localhost:8080/api/trends/1?points=60
+
+### 10. 查看系统状态
+curl http://localhost:8080/api/system/status
+
+
+## 四、前端集成示例 (JavaScript)
+============================================================
+
+### 获取总览数据
+fetch('http://localhost:8080/api/overview')
+  .then(res => res.json())
+  .then(data => {
+    data.rooms.forEach(room => {
+      console.log(`冷库${room.room_id}: ${room.temp_actual}degC [${room.status_text}]`);
+    });
+  });
+
+### 修改温度参数
+fetch('http://localhost:8080/api/rooms/1/params', {
+  method: 'PUT',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({high_limit: -15.0, low_limit: -20.0})
+})
+.then(res => res.json())
+.then(data => console.log(data.message));
+
+### 定时刷新 (每秒更新)
+setInterval(() => {
+  fetch('http://localhost:8080/api/overview')
+    .then(res => res.json())
+    .then(data => updateUI(data));
+}, 1000);
+
+
+## 五、运行模式切换
+============================================================
+
+### 模拟模式 (默认, 开发演示用)
+- 无需PLC硬件
+- 温度数据自动模拟变化 (制冷时下降, 不制冷时上升)
+- 所有写入操作在内存中生效
+- 启动: 双击 start.bat, 选择1
+
+### 真实模式 (连接实际PLC)
+- 需要S7-1500 PLC在线
+- 需要安装 snap7 库: pip install python-snap7
+- 需要S7-1500启用PUT/GET通信
+- 需要在config.py中确认DB编号和偏移地址
+- 启动: 双击 start.bat, 选择2
+- 或设置环境变量: set MOCK_MODE=false && python main.py
+
+
+## 六、配置说明
+============================================================
+
+编辑 config.py 修改以下参数:
+
+参数          | 默认值         | 说明
+--------------|---------------|------------------
+PLC_IP        | 192.168.0.1   | S7-1500的IP地址
+PLC_DB_NUM    | 100           | DB_GlobalData编号
+API_PORT      | 8080          | API服务端口
+MOCK_MODE     | True          | 是否模拟模式
+POLL_INTERVAL | 1.0           | 数据刷新间隔(秒)
+ROOM_COUNT    | 9             | 冷库数量
+COMPRESSOR_COUNT | 10         | 每库压缩机数量
+
+
+## 七、常见问题
+============================================================
+
+Q: 启动报错 "No module named 'fastapi'"
+A: 运行 pip install -r requirements.txt 安装依赖
+
+Q: 真实模式连不上PLC
+A: 1) 确认PLC IP正确 2) 确认网络连通(ping) 3) 确认PLC已启用PUT/GET
+   4) 确认防火墙允许102端口
+
+Q: 如何确认DB偏移地址正确
+A: 在TIA Portal中打开DB_GlobalData, 右键→属性→偏移量
+   将实际偏移填入config.py的DB_OFFSETS
+
+Q: API支持多少并发
+A: FastAPI基于asyncio, 单进程可处理数千并发请求
+   PLC通信使用锁保护, 不会产生竞争
+
+Q: 如何在生产环境部署
+A: 1) 使用 uvicorn --workers 4 main:app 多进程
+   2) 使用 nginx 反向代理
+   3) 设置 MOCK_MODE=false
+   4) 配置防火墙仅允许信任IP访问8080端口
