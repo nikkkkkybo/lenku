@@ -1,0 +1,9 @@
+node_modules/
+__pycache__/
+*.pyc
+*.log
+.aicoding-chat-workspace/
+package.json
+package-lock.json
+download_git.js
+push_to_github.js
