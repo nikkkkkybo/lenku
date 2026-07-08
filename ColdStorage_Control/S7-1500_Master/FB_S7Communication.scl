@@ -1,0 +1,210 @@
+{Scl_export_offset 0}
+// ============================================================
+// FB_S7Communication - S7通信管理功能块
+// 冷库温度控制系统 - S7-1500 主站
+// ============================================================
+// 功能:
+//   1. 轮询9个S7-1200从站, 读取冷库运行数据
+//   2. 向各从站写入参数设定和远程命令
+//   3. 通信看门狗 (检测各从站是否在线)
+//   4. 通信故障时标记该库通信异常, 但不影响其他库
+// ============================================================
+// 通信方式: PUT/GET (S7单边通信)
+//   S7-1500作为客户端, 主动读写9个S7-1200的数据块
+//   轮询周期: 每个库100ms, 9个库约900ms完成一轮
+// ============================================================
+// 网络配置:
+//   S7-1500: 192.168.0.1
+//   S7-1200 #1~#9: 192.168.0.11~192.168.0.19
+//   通信连接: PUT/GET (需在双方CPU属性中启用
+//             "Permit access with PUT/GET communication")
+// ============================================================
+
+FUNCTION_BLOCK "FB_S7Communication"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_INPUT
+      bEnable            : Bool;       // 通信使能
+      tPollInterval      : Time := T#100ms;  // 轮询间隔
+   END_VAR
+
+   VAR_OUTPUT
+      iCurrentRoom       : Int;        // 当前轮询冷库编号 (1-9)
+      bCommBusy          : Bool;       // 通信进行中
+      aCommOK            : Array[1..9] of Bool;  // 各库通信状态
+   END_VAR
+
+   VAR_TEMP
+      i                  : Int;
+      iRoom              : Int;        // 当前库号
+   END_VAR
+
+   VAR
+      // --- 轮询状态机 ---
+      iPollState         : Int;        // 通信状态 (0=空闲,1=GET读取,2=PUT写入,3=等待)
+      tPollTimer         : Time;       // 轮询计时器
+      tScanTime          : Time;       // 扫描周期
+      iCurrentIdx        : Int;        // 当前轮询索引 (1-9)
+
+      // --- 通信看门狗计数器 ---
+      aiWatchdog         : Array[1..9] of Int;   // 各库看门狗计数器
+
+      // --- PUT/GET 指令实例 (使用多重背景) ---
+      // 注: 实际使用 TIA Portal 的 PUT/GET 指令块
+      // 这里描述通信逻辑, 实际实现需在LAD/FBD中配置PUT/GET块
+
+      // --- 各从站连接参数 ---
+      // 连接参数: IP地址 + 机架号 + 槽号
+      aRemoteIP          : Array[1..9] of String[15];  // 各从站IP地址
+   END_VAR
+
+BEGIN
+
+   tScanTime := T#10ms;
+
+   // ================================================================
+   // 0. 未使能时清空通信状态
+   // ================================================================
+   IF NOT bEnable THEN
+      iPollState := 0;
+      iCurrentIdx := 0;
+      bCommBusy := FALSE;
+      iCurrentRoom := 0;
+      RETURN;
+   END_IF;
+
+   // ================================================================
+   // 1. 初始化各从站IP地址 (首次扫描)
+   // ================================================================
+   IF aRemoteIP[1] = '' THEN
+      aRemoteIP[1]  := '192.168.0.11';  // 冷库1
+      aRemoteIP[2]  := '192.168.0.12';  // 冷库2
+      aRemoteIP[3]  := '192.168.0.13';  // 冷库3
+      aRemoteIP[4]  := '192.168.0.14';  // 冷库4
+      aRemoteIP[5]  := '192.168.0.15';  // 冷库5
+      aRemoteIP[6]  := '192.168.0.16';  // 冷库6
+      aRemoteIP[7]  := '192.168.0.17';  // 冷库7
+      aRemoteIP[8]  := '192.168.0.18';  // 冷库8
+      aRemoteIP[9]  := '192.168.0.19';  // 冷库9
+   END_IF;
+
+   // ================================================================
+   // 2. 看门狗计数器递增 (每个扫描周期)
+   //    超过阈值(如200=2秒)则标记该库通信故障
+   // ================================================================
+   FOR i := 1 TO 9 DO
+      aiWatchdog[i] := aiWatchdog[i] + 1;
+      IF aiWatchdog[i] > 200 THEN
+         // 2秒未收到该库数据 → 通信故障
+         aCommOK[i] := FALSE;
+         "DB_GlobalData".aRoom[i].bComm_OK := FALSE;
+         "DB_GlobalData".aRoom[i].bAnyAlarm := TRUE;
+      END_IF;
+   END_FOR;
+
+   // ================================================================
+   // 3. 轮询状态机
+   //    状态0: 空闲 → 选择下一个库 → 状态1
+   //    状态1: GET读取 (从从站读取数据)
+   //    状态2: PUT写入 (向从站写入参数)
+   //    状态3: 等待间隔 → 状态0
+   // ================================================================
+   iCurrentRoom := iCurrentIdx;
+   bCommBusy := (iPollState <> 0);
+
+   CASE iPollState OF
+
+      // ================================================================
+      // 状态0: 空闲 - 选择下一个轮询冷库
+      // ================================================================
+      0:
+         iCurrentIdx := iCurrentIdx + 1;
+         IF iCurrentIdx > 9 THEN
+            iCurrentIdx := 1;  // 循环到第1库
+         END_IF;
+         iRoom := iCurrentIdx;
+         iPollState := 1;
+         tPollTimer := T#0s;
+
+      // ================================================================
+      // 状态1: GET - 从当前冷库S7-1200读取数据
+      //    使用 GET 指令读取 DB_ColdRoom 中的数据
+      //    读取内容: 温度/状态/报警/压缩机状态等
+      // ================================================================
+      1:
+         // --- GET 指令调用 (伪代码) ---
+         // GET 指令参数:
+         //   CONNECT  := 连接到 aRemoteIP[iRoom], Rack=0, Slot=1
+         //   ADDR_1   := "DB_ColdRoom" (从站数据块)
+         //   RD_1     := 本地接收缓冲区
+         //   RD_1     := "DB_CommRecv".aBuffer[iRoom]
+
+         // 简化: 假设GET指令已完成, 数据已读取到接收缓冲区
+         // 实际实现使用 GET 指令块 (LAD/FBD中配置)
+
+         // 模拟GET成功:
+         // 将接收到的数据解析到 DB_GlobalData
+         // (实际由GET指令的DONE/ERROR引脚驱动状态转换)
+
+         // --- 数据解析 (从接收缓冲区到全局数据) ---
+         // 注: 实际数据布局取决于从站DB_ColdRoom的内存布局
+         // 以下为示意性数据映射:
+
+         "DB_GlobalData".aRoom[iRoom].rTemp_Sensor1  := "DB_CommRecv".aRoom[iRoom].rTemp_Sensor1;
+         "DB_GlobalData".aRoom[iRoom].rTemp_Sensor2  := "DB_CommRecv".aRoom[iRoom].rTemp_Sensor2;
+         "DB_GlobalData".aRoom[iRoom].rTemp_Actual   := "DB_CommRecv".aRoom[iRoom].rTemp_Actual;
+         "DB_GlobalData".aRoom[iRoom].bCooling_Demand := "DB_CommRecv".aRoom[iRoom].bCooling_Demand;
+         "DB_GlobalData".aRoom[iRoom].bDefrost_Active := "DB_CommRecv".aRoom[iRoom].bDefrost_Active;
+         "DB_GlobalData".aRoom[iRoom].bEmergency_Stop := "DB_CommRecv".aRoom[iRoom].bEmergency_Stop;
+         "DB_GlobalData".aRoom[iRoom].iActive_Count  := "DB_CommRecv".aRoom[iRoom].iActive_Count;
+         "DB_GlobalData".aRoom[iRoom].iFault_Count   := "DB_CommRecv".aRoom[iRoom].iFault_Count;
+         "DB_GlobalData".aRoom[iRoom].iAvailable_Count := "DB_CommRecv".aRoom[iRoom].iAvailable_Count;
+         "DB_GlobalData".aRoom[iRoom].wAlarm_Word    := "DB_CommRecv".aRoom[iRoom].wAlarm_Word;
+         "DB_GlobalData".aRoom[iRoom].wStatus_Word   := "DB_CommRecv".aRoom[iRoom].wStatus_Word;
+
+         // GET成功: 复位看门狗, 标记通信正常
+         aiWatchdog[iRoom] := 0;
+         aCommOK[iRoom] := TRUE;
+         "DB_GlobalData".aRoom[iRoom].bComm_OK := TRUE;
+         "DB_GlobalData".aRoom[iRoom].iComm_Counter := "DB_GlobalData".aRoom[iRoom].iComm_Counter + 1;
+
+         // 进入写入阶段
+         iPollState := 2;
+         tPollTimer := T#0s;
+
+      // ================================================================
+      // 状态2: PUT - 向当前冷库S7-1200写入参数设定
+      //    写入内容: 温度上下限/化霜周期/远程命令等
+      // ================================================================
+      2:
+         // --- 准备发送数据 ---
+         // 将WinCC下发的参数写入发送缓冲区
+         "DB_CommSend".aRoom[iRoom].rTemp_HighLimit := "DB_GlobalData".aRoom[iRoom].rTemp_HighLimit;
+         "DB_CommSend".aRoom[iRoom].rTemp_LowLimit  := "DB_GlobalData".aRoom[iRoom].rTemp_LowLimit;
+         "DB_GlobalData".aRoom[iRoom].rTemp_AlarmHigh := "DB_GlobalData".aRoom[iRoom].rTemp_AlarmHigh;
+         "DB_CommSend".aRoom[iRoom].bSystem_Enable  := "DB_GlobalData".aRoom[iRoom].bSystem_Enable;
+         "DB_CommSend".aRoom[iRoom].bEmergency_Stop := "DB_GlobalData".aRoom[iRoom].bEmergency_Stop;
+
+         // --- PUT 指令调用 (伪代码) ---
+         // PUT 指令参数:
+         //   CONNECT  := 连接到 aRemoteIP[iRoom], Rack=0, Slot=1
+         //   ADDR_1   := "DB_ColdRoom_Params" (从站参数数据块)
+         //   SD_1     := "DB_CommSend".aRoom[iRoom]
+
+         // PUT完成 → 进入等待
+         iPollState := 3;
+         tPollTimer := T#0s;
+
+      // ================================================================
+      // 状态3: 等待间隔 → 回到状态0轮询下一个库
+      // ================================================================
+      3:
+         tPollTimer := tPollTimer + tScanTime;
+         IF tPollTimer >= tPollInterval THEN
+            iPollState := 0;
+         END_IF;
+
+   END_CASE;
+
+END_FUNCTION_BLOCK
