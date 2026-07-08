@@ -1,0 +1,217 @@
+{Scl_export_offset 0}
+// ============================================================
+// FB_SafetyAlarm - 安全报警联锁功能块
+// 冷库温度控制系统 - S7-1200 冷库控制器
+// ============================================================
+// 功能:
+//   1. 汇总各类报警信号 (超温/传感器/压缩机/过载/通信/急停)
+//   2. 生成报警状态字 (位编码, 用于通信传输)
+//   3. 生成运行状态字 (位编码)
+//   4. 安全联锁动作:
+//      - 急停 → 立即停止所有压缩机
+//      - 超温 → 报警 + 维持制冷 (不停机)
+//      - 传感器故障 → 保持最后状态 + 报警
+//      - 通信中断 → S7-1200独立运行 (不依赖主站)
+//   5. 报警确认与复位
+// ============================================================
+// 报警状态字 (wAlarmWord) 位定义:
+//   Bit0  (0x0001) - 超温报警
+//   Bit1  (0x0002) - 传感器1故障
+//   Bit2  (0x0004) - 传感器2故障
+//   Bit3  (0x0008) - 双传感器故障
+//   Bit4  (0x0010) - 传感器温差预警
+//   Bit5  (0x0020) - 压缩机故障 (任一台)
+//   Bit6  (0x0040) - 压缩机过载 (任一台)
+//   Bit7  (0x0080) - 通信故障
+//   Bit8  (0x0100) - 急停
+//   Bit9  (0x0200) - 化霜超时
+//   Bit10 (0x0400) - 可用压缩机不足 (<3台)
+// ============================================================
+
+FUNCTION_BLOCK "FB_SafetyAlarm"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_INPUT
+      // --- 报警输入 ---
+      bTempAlarm         : Bool;       // 超温报警 (来自FB_TempControl)
+      bSensor1Fault      : Bool;       // 传感器1故障
+      bSensor2Fault      : Bool;       // 传感器2故障
+      bSensorFault       : Bool;       // 双传感器故障
+      bSensorWarning     : Bool;       // 传感器温差预警
+      bCommFault         : Bool;       // 通信故障
+      bEmergencyStop     : Bool;       // 急停信号
+      bDefrostTimeout    : Bool;       // 化霜超时
+
+      // --- 压缩机状态 ---
+      aCompFault         : Array[1..10] of Bool;   // 各台故障
+      aCompOverload      : Array[1..10] of Bool;   // 各台过载
+      iFaultCount        : Int;        // 故障台数
+      iAvailableCount    : Int;        // 可用台数
+
+      // --- 运行状态 ---
+      bCoolingDemand     : Bool;       // 制冷需求
+      bDefrostActive     : Bool;       // 化霜中
+      iActiveCount       : Int;        // 运行台数
+
+      // --- 操作 ---
+      bAlarmAck          : Bool;       // 报警确认 (复位蜂鸣器)
+   END_VAR
+
+   VAR_OUTPUT
+      wAlarmWord         : Word;       // 报警状态字 (位编码)
+      wStatusWord        : Word;       // 运行状态字 (位编码)
+      bAnyAlarm          : Bool;       // 有任何报警
+      bCriticalAlarm     : Bool;       // 严重报警 (需立即处理)
+      bAlarmHorn         : Bool;       // 报警蜂鸣器输出
+      bEmergencyStop_Out : Bool;       // 急停输出 (到分组启动, 停止全部)
+   END_VAR
+
+   VAR_TEMP
+      i                  : Int;
+      wTemp              : Word;
+      bCompFault         : Bool;
+      bCompOverload      : Bool;
+   END_VAR
+
+   VAR
+      bHornLatched       : Bool;       // 蜂鸣器锁存
+   END_VAR
+
+BEGIN
+
+   // ================================================================
+   // 1. 检查压缩机故障/过载 (任一台)
+   // ================================================================
+   bCompFault := FALSE;
+   bCompOverload := FALSE;
+
+   FOR i := 1 TO 10 DO
+      IF aCompFault[i] THEN
+         bCompFault := TRUE;
+      END_IF;
+      IF aCompOverload[i] THEN
+         bCompOverload := TRUE;
+      END_IF;
+   END_FOR;
+
+   // ================================================================
+   // 2. 急停处理 (最高优先级)
+   //    急停 → 立即停止所有压缩机
+   // ================================================================
+   bEmergencyStop_Out := bEmergencyStop;
+
+   // ================================================================
+   // 3. 生成报警状态字 (位编码)
+   // ================================================================
+   wTemp := 16#0000;
+
+   // Bit0: 超温报警
+   IF bTempAlarm THEN
+      wTemp := wTemp OR 16#0001;
+   END_IF;
+
+   // Bit1: 传感器1故障
+   IF bSensor1Fault THEN
+      wTemp := wTemp OR 16#0002;
+   END_IF;
+
+   // Bit2: 传感器2故障
+   IF bSensor2Fault THEN
+      wTemp := wTemp OR 16#0004;
+   END_IF;
+
+   // Bit3: 双传感器故障
+   IF bSensorFault THEN
+      wTemp := wTemp OR 16#0008;
+   END_IF;
+
+   // Bit4: 传感器温差预警
+   IF bSensorWarning THEN
+      wTemp := wTemp OR 16#0010;
+   END_IF;
+
+   // Bit5: 压缩机故障
+   IF bCompFault THEN
+      wTemp := wTemp OR 16#0020;
+   END_IF;
+
+   // Bit6: 压缩机过载
+   IF bCompOverload THEN
+      wTemp := wTemp OR 16#0040;
+   END_IF;
+
+   // Bit7: 通信故障
+   IF bCommFault THEN
+      wTemp := wTemp OR 16#0080;
+   END_IF;
+
+   // Bit8: 急停
+   IF bEmergencyStop THEN
+      wTemp := wTemp OR 16#0100;
+   END_IF;
+
+   // Bit9: 化霜超时
+   IF bDefrostTimeout THEN
+      wTemp := wTemp OR 16#0200;
+   END_IF;
+
+   // Bit10: 可用压缩机不足 (<3台)
+   IF iAvailableCount < 3 THEN
+      wTemp := wTemp OR 16#0400;
+   END_IF;
+
+   wAlarmWord := wTemp;
+
+   // ================================================================
+   // 4. 生成运行状态字 (位编码)
+   // ================================================================
+   wTemp := 16#0000;
+
+   // Bit0: 系统运行中 (制冷需求有效)
+   IF bCoolingDemand THEN
+      wTemp := wTemp OR 16#0001;
+   END_IF;
+
+   // Bit1: 化霜中
+   IF bDefrostActive THEN
+      wTemp := wTemp OR 16#0002;
+   END_IF;
+
+   // Bit2-11: 各台压缩机运行状态
+   // (简化: 仅用Bit2表示有压缩机运行)
+   IF iActiveCount > 0 THEN
+      wTemp := wTemp OR 16#0004;
+   END_IF;
+
+   // Bit12: 系统正常 (无报警)
+   IF wAlarmWord = 16#0000 THEN
+      wTemp := wTemp OR 16#1000;
+   END_IF;
+
+   wStatusWord := wTemp;
+
+   // ================================================================
+   // 5. 报警汇总
+   // ================================================================
+   // 有任何报警
+   bAnyAlarm := (wAlarmWord <> 16#0000);
+
+   // 严重报警 (需立即处理): 急停/双传感器故障/超温/可用压缩机不足
+   bCriticalAlarm := bEmergencyStop OR bSensorFault OR bTempAlarm OR (iAvailableCount < 3);
+
+   // ================================================================
+   // 6. 报警蜂鸣器 (带锁存与确认)
+   //    新报警触发蜂鸣器, 按确认键后静音
+   // ================================================================
+   IF bAnyAlarm THEN
+      bHornLatched := TRUE;
+   END_IF;
+
+   IF bAlarmAck THEN
+      bHornLatched := FALSE;
+   END_IF;
+
+   bAlarmHorn := bHornLatched AND bAnyAlarm;
+
+END_FUNCTION_BLOCK
