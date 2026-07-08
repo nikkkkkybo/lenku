@@ -1,0 +1,174 @@
+{Scl_export_offset 0}
+// ============================================================
+// FB_TempControl - 温度控制功能块
+// 冷库温度控制系统 - S7-1200 冷库控制器
+// ============================================================
+// 功能:
+//   1. 双PT100传感器冗余诊断与自动切换
+//   2. 温度回差控制 (防止频繁启停, 保护压缩机)
+//   3. 超温报警
+//   4. 传感器故障保持最后状态
+// ============================================================
+// 回差控制原理:
+//   温度 >= HighLimit  → 制冷需求 = TRUE  (启动制冷)
+//   温度 <= LowLimit   → 制冷需求 = FALSE (停止制冷)
+//   LowLimit < 温度 < HighLimit → 保持上一次状态 (回差带)
+// ============================================================
+
+FUNCTION_BLOCK "FB_TempControl"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_INPUT
+      // --- 温度传感器输入 ---
+      rTemp_S1          : Real;       // 主传感器温度 (degC)
+      rTemp_S2          : Real;       // 备用传感器温度 (degC)
+
+      // --- 设定值 ---
+      rHighLimit        : Real;       // 启动温度上限 (degC)
+      rLowLimit         : Real;       // 停止温度下限 (degC)
+      rAlarmHigh        : Real;       // 超温报警值 (degC)
+
+      // --- 传感器诊断参数 ---
+      rSensor_Min       : Real := -50.0;  // 传感器有效范围下限
+      rSensor_Max       : Real := 50.0;   // 传感器有效范围上限
+      rSensor_DiffMax   : Real := 5.0;    // 双传感器允许温差
+
+      // --- 控制输入 ---
+      bEnable           : Bool;       // 温度控制使能
+      bDefrost_Active   : Bool;       // 化霜进行中 (化霜时禁止制冷)
+   END_VAR
+
+   VAR_OUTPUT
+      bCoolingDemand    : Bool;       // 制冷需求信号
+      bTempAlarm        : Bool;       // 超温报警
+      bSensorFault      : Bool;       // 传感器故障 (双传感器均故障)
+      bSensorWarning    : Bool;       // 传感器预警 (温差过大)
+      rTempActual       : Real;       // 实际使用温度
+      bS1_Fault         : Bool;       // 传感器1故障
+      bS2_Fault         : Bool;       // 传感器2故障
+   END_VAR
+
+   VAR_TEMP
+      bS1_Valid         : Bool;       // 传感器1有效
+      bS2_Valid         : Bool;       // 传感器2有效
+      rDiff             : Real;       // 双传感器温差
+   END_VAR
+
+   VAR
+      bCoolingDemand_Stat : Bool;     // 制冷需求状态 (保持, 实现回差)
+      bTempAlarm_Stat     : Bool;     // 报警状态 (保持)
+   END_VAR
+
+BEGIN
+
+   // ================================================================
+   // 1. 传感器信号范围诊断
+   //    检查传感器读数是否在合理物理范围内
+   //    超出范围视为传感器故障 (断线/短路)
+   // ================================================================
+   IF (rTemp_S1 < rSensor_Min) OR (rTemp_S1 > rSensor_Max) THEN
+      bS1_Fault := TRUE;
+   ELSE
+      bS1_Fault := FALSE;
+   END_IF;
+
+   IF (rTemp_S2 < rSensor_Min) OR (rTemp_S2 > rSensor_Max) THEN
+      bS2_Fault := TRUE;
+   ELSE
+      bS2_Fault := FALSE;
+   END_IF;
+
+   // ================================================================
+   // 2. 双传感器冗余处理
+   //    两个都正常 → 取平均值, 同时检测温差
+   //    仅一个正常 → 使用正常的那个
+   //    两个都故障 → 报警, 保持最后状态
+   // ================================================================
+   bS1_Valid := NOT bS1_Fault;
+   bS2_Valid := NOT bS2_Fault;
+
+   IF bS1_Valid AND bS2_Valid THEN
+      // --- 双传感器均正常: 取平均值 ---
+      rTempActual := (rTemp_S1 + rTemp_S2) / 2.0;
+
+      // 温差过大预警 (可能是其中一个传感器漂移)
+      rDiff := rTemp_S1 - rTemp_S2;
+      IF rDiff < 0.0 THEN
+         rDiff := -rDiff;  // 取绝对值
+      END_IF;
+      IF rDiff > rSensor_DiffMax THEN
+         bSensorWarning := TRUE;
+      ELSE
+         bSensorWarning := FALSE;
+      END_IF;
+
+      bSensorFault := FALSE;
+
+   ELSIF bS1_Valid THEN
+      // --- 仅传感器1正常 ---
+      rTempActual := rTemp_S1;
+      bSensorWarning := FALSE;
+      bSensorFault := FALSE;
+
+   ELSIF bS2_Valid THEN
+      // --- 仅传感器2正常 ---
+      rTempActual := rTemp_S2;
+      bSensorWarning := FALSE;
+      bSensorFault := FALSE;
+
+   ELSE
+      // --- 双传感器均故障 ---
+      // 保持上一次温度值, 保持上一次制冷状态
+      // 不更新 rTempActual (保持最后有效值)
+      bSensorFault := TRUE;
+      bSensorWarning := FALSE;
+      // 传感器故障时不改变制冷需求 (保持最后状态)
+      // 退出温度控制逻辑, 等待维修
+      RETURN;
+   END_IF;
+
+   // ================================================================
+   // 3. 温度回差控制 (核心逻辑)
+   //    使用状态保持实现回差带
+   //    温度 >= HighLimit → 启动制冷
+   //    温度 <= LowLimit  → 停止制冷
+   //    中间区域 → 保持当前状态
+   // ================================================================
+   IF bEnable AND NOT bDefrost_Active THEN
+      // 系统使能且非化霜状态
+
+      IF rTempActual >= rHighLimit THEN
+         // 温度达到上限 → 需要制冷
+         bCoolingDemand_Stat := TRUE;
+
+      ELSIF rTempActual <= rLowLimit THEN
+         // 温度降到下限 → 停止制冷
+         bCoolingDemand_Stat := FALSE;
+
+      END_IF;
+      // 回差带内: bCoolingDemand_Stat 保持不变
+
+   ELSE
+      // 系统未使能或化霜中 → 停止制冷
+      bCoolingDemand_Stat := FALSE;
+
+   END_IF;
+
+   bCoolingDemand := bCoolingDemand_Stat;
+
+   // ================================================================
+   // 4. 超温报警
+   //    温度超过报警设定值 → 报警
+   //    温度回落到报警值以下 → 报警自动消除
+   // ================================================================
+   IF rTempActual >= rAlarmHigh THEN
+      bTempAlarm_Stat := TRUE;
+   ELSIF rTempActual < (rAlarmHigh - 2.0) THEN
+      // 报警解除带回差 (低于报警值2degC才解除)
+      bTempAlarm_Stat := FALSE;
+   END_IF;
+
+   bTempAlarm := bTempAlarm_Stat;
+
+END_FUNCTION_BLOCK
