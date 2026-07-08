@@ -1,0 +1,231 @@
+{Scl_export_offset 0}
+// ============================================================
+// OB1 - 主循环组织块
+// 冷库温度控制系统 - S7-1200 冷库控制器
+// ============================================================
+// 功能:
+//   主循环, 每个扫描周期执行一次
+//   依次调用所有功能块, 实现完整的冷库温度控制
+// ============================================================
+// 调用顺序:
+//   1. FB_TempControl   - 温度控制 (回差+双传感器冗余)
+//   2. FB_Rotation      - 压缩机轮换优先级更新
+//   3. FB_GroupStart    - 分时分组错峰启动/停止
+//   4. FB_Compressor    - 10台压缩机独立控制 (循环调用)
+//   5. FB_Defrost       - 化霜控制
+//   6. FB_SafetyAlarm   - 安全报警联锁
+//   7. FC_PackCommData  - 通信数据打包 (发送给S7-1500)
+// ============================================================
+
+ORGANIZATION_BLOCK "OB1"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_TEMP
+      i                  : Int;        // 循环变量
+      aRunTime           : Array[1..10] of DInt;   // 各台运行时间 (传给轮换)
+      aFault             : Array[1..10] of Bool;   // 各台故障
+      aIsolated          : Array[1..10] of Bool;   // 各台隔离
+      aAvailable         : Array[1..10] of Bool;   // 各台可用
+      aCompOverload      : Array[1..10] of Bool;   // 各台过载
+   END_VAR
+
+   // ================================================================
+   // 静态变量: 冷库实例数据 (使用UDT_ColdRoom)
+   // 注: 实际项目中使用 DB_ColdRoom 数据块 (类型 UDT_ColdRoom)
+   //     此处以 DB_ColdRoom 为例, 代表当前冷库的全部数据
+   // ================================================================
+
+BEGIN
+
+   // ================================================================
+   // 1. 温度控制 (每个扫描周期执行)
+   //    输入: 双传感器温度 + 设定值
+   //    输出: 制冷需求 + 报警 + 传感器状态
+   // ================================================================
+   "FB_TempControl".bEnable        := "DB_ColdRoom".bSystem_Enable;
+   "FB_TempControl".bDefrost_Active := "DB_ColdRoom".bDefrost_Active;
+   "FB_TempControl".rTemp_S1       := "DB_ColdRoom".rTemp_Sensor1;
+   "FB_TempControl".rTemp_S2       := "DB_ColdRoom".rTemp_Sensor2;
+   "FB_TempControl".rHighLimit     := "DB_ColdRoom".rTemp_HighLimit;
+   "FB_TempControl".rLowLimit      := "DB_ColdRoom".rTemp_LowLimit;
+   "FB_TempControl".rAlarmHigh     := "DB_ColdRoom".rTemp_AlarmHigh;
+
+   // 调用FB_TempControl (使用背景DB: DB_TempControl)
+   "FB_TempControl"(
+
+   );
+
+   // 回写结果到冷库数据块
+   "DB_ColdRoom".bCooling_Demand := "FB_TempControl".bCoolingDemand;
+   "DB_ColdRoom".bTemp_Alarm     := "FB_TempControl".bTempAlarm;
+   "DB_ColdRoom".bSensor1_Fault  := "FB_TempControl".bS1_Fault;
+   "DB_ColdRoom".bSensor2_Fault  := "FB_TempControl".bS2_Fault;
+   "DB_ColdRoom".bSensor_Fault   := "FB_TempControl".bSensorFault;
+   "DB_ColdRoom".bSensor_Warning := "FB_TempControl".bSensorWarning;
+   "DB_ColdRoom".rTemp_Actual    := "FB_TempControl".rTempActual;
+
+   // ================================================================
+   // 2. 压缩机轮换优先级更新
+   //    在制冷需求上升沿时更新排序
+   // ================================================================
+   // 准备输入数据
+   FOR i := 1 TO 10 DO
+      aRunTime[i]   := "DB_ColdRoom".aCompressor[i].diRunTime;
+      aFault[i]     := "DB_ColdRoom".aCompressor[i].bFault;
+      aIsolated[i]  := "DB_ColdRoom".aCompressor[i].bIsolated;
+   END_FOR;
+
+   // 调用FB_Rotation (使用背景DB: DB_Rotation)
+   "FB_Rotation"(
+      bUpdateTrigger := "DB_ColdRoom".bCooling_Demand AND NOT "DB_ColdRoom".bLast_Demand,
+      bEnable        := "DB_ColdRoom".bSystem_Enable,
+      aRunTime       := aRunTime,
+      aFault         := aFault,
+      aIsolated      := aIsolated
+   );
+
+   // 回写轮换优先级表
+   "DB_ColdRoom".bLast_Demand := "DB_ColdRoom".bCooling_Demand;
+   // 注意: aRotationOrder 从FB_Rotation输出获取
+   // (实际实现中通过背景DB传递)
+
+   // ================================================================
+   // 3. 分时分组错峰启动/停止
+   // ================================================================
+   // 准备可用状态
+   FOR i := 1 TO 10 DO
+      aAvailable[i] := "DB_ColdRoom".aCompressor[i].bEnable;
+   END_FOR;
+
+   // 调用FB_GroupStart (使用背景DB: DB_GroupStart)
+   "FB_GroupStart"(
+      bCoolingDemand  := "DB_ColdRoom".bCooling_Demand,
+      bEnable         := "DB_ColdRoom".bSystem_Enable,
+      bEmergencyStop  := "DB_ColdRoom".bEmergency_Stop,
+      aRotationOrder  := "DB_ColdRoom".aRotationOrder,
+      aAvailable      := aAvailable
+   );
+
+   // ================================================================
+   // 4. 10台压缩机独立控制 (循环调用)
+   //    每台压缩机使用独立的背景DB, 实现完全隔离
+   //    某台故障不影响其他9台
+   // ================================================================
+   FOR i := 1 TO 10 DO
+      // 调用FB_Compressor (每台一个背景DB实例)
+      // 实际实现中使用多重背景或多DB:
+      //   "DB_Comp_1".."DB_Comp_10" 或 多重背景DB
+
+      // 准备输入
+      // bStartCmd 来自 FB_GroupStart 的输出
+      // bStopCmd 来自 FB_GroupStart 的输出
+      // bRunFeedback 来自物理I/O (接触器辅助触点)
+      // bOverload 来自物理I/O (热继电器)
+      // bManualMode/bManualStart/bManualStop 来自HMI/WinCC
+
+      // 注: 以下是伪代码示意, 实际使用多重背景或CASE选择
+      (*
+      "FB_Compressor"(
+         bStartCmd     := aStartCmd[i],
+         bStopCmd      := aStopCmd[i],
+         bEnable       := TRUE,
+         bRunFeedback  := %I0.x  (物理输入),
+         bOverload     := %I0.x  (物理输入),
+         bManualMode   := "DB_ColdRoom".aCompressor[i].bManual_Mode,
+         bManualStart  := "DB_ColdRoom".aCompressor[i].bManual_Start,
+         bManualStop   := "DB_ColdRoom".aCompressor[i].bManual_Stop,
+         bFaultReset   := "DB_ColdRoom".aCompressor[i].bFault_Reset
+      );
+
+      // 回写结果
+      "DB_ColdRoom".aCompressor[i].bRun_Cmd      := "FB_Compressor".bRunOutput;
+      "DB_ColdRoom".aCompressor[i].bRunning      := "FB_Compressor".bRunning;
+      "DB_ColdRoom".aCompressor[i].bFault        := "FB_Compressor".bFault;
+      "DB_ColdRoom".aCompressor[i].bFault_Latched := "FB_Compressor".bFaultLatched;
+      "DB_ColdRoom".aCompressor[i].bEnable       := "FB_Compressor".bAvailable;
+      "DB_ColdRoom".aCompressor[i].diRunTime     := "FB_Compressor".diRunTime;
+      "DB_ColdRoom".aCompressor[i].diStartCount  := "FB_Compressor".diStartCount;
+
+      // 物理输出
+      // %Q0.x := "FB_Compressor".bRunOutput;
+      *)
+
+   END_FOR;
+
+   // ================================================================
+   // 5. 化霜控制
+   // ================================================================
+   "FB_Defrost"(
+      bEnable         := "DB_ColdRoom".bSystem_Enable,
+      bManualStart    := FALSE,  // 从HMI获取手动化霜命令
+      rEvapTemp       := "DB_ColdRoom".rEvap_Temp,
+      tDefrostCycle   := "DB_ColdRoom".tDefrost_Cycle,
+      tDefrostMaxTime := "DB_ColdRoom".tDefrost_Duration,
+      tDrainTime      := "DB_ColdRoom".tDefrost_Drain,
+      rDefrostEndTemp := "DB_ColdRoom".rDefrost_EndTemp
+   );
+
+   // 回写化霜状态
+   "DB_ColdRoom".bDefrost_Active := "FB_Defrost".bDefrostActive;
+   "DB_ColdRoom".bDefrost_Heater := "FB_Defrost".bDefrostHeater;
+   "DB_ColdRoom".iDefrost_State  := "FB_Defrost".iDefrostState;
+
+   // ================================================================
+   // 6. 安全报警联锁
+   // ================================================================
+   // 准备压缩机状态
+   FOR i := 1 TO 10 DO
+      aFault[i]        := "DB_ColdRoom".aCompressor[i].bFault;
+      aCompOverload[i] := "DB_ColdRoom".aCompressor[i].bOverload;
+   END_FOR;
+
+   // 统计
+   "DB_ColdRoom".iActive_Count    := 0;
+   "DB_ColdRoom".iFault_Count     := 0;
+   "DB_ColdRoom".iAvailable_Count := 0;
+   FOR i := 1 TO 10 DO
+      IF "DB_ColdRoom".aCompressor[i].bRunning THEN
+         "DB_ColdRoom".iActive_Count := "DB_ColdRoom".iActive_Count + 1;
+      END_IF;
+      IF "DB_ColdRoom".aCompressor[i].bFault THEN
+         "DB_ColdRoom".iFault_Count := "DB_ColdRoom".iFault_Count + 1;
+      END_IF;
+      IF "DB_ColdRoom".aCompressor[i].bEnable THEN
+         "DB_ColdRoom".iAvailable_Count := "DB_ColdRoom".iAvailable_Count + 1;
+      END_IF;
+   END_FOR;
+
+   // 调用FB_SafetyAlarm
+   "FB_SafetyAlarm"(
+      bTempAlarm      := "DB_ColdRoom".bTemp_Alarm,
+      bSensor1Fault   := "DB_ColdRoom".bSensor1_Fault,
+      bSensor2Fault   := "DB_ColdRoom".bSensor2_Fault,
+      bSensorFault    := "DB_ColdRoom".bSensor_Fault,
+      bSensorWarning  := "DB_ColdRoom".bSensor_Warning,
+      bCommFault      := "DB_ColdRoom".bComm_Fault,
+      bEmergencyStop  := "DB_ColdRoom".bEmergency_Stop,
+      bDefrostTimeout := FALSE,
+      aCompFault      := aFault,
+      aCompOverload   := aCompOverload,
+      iFaultCount     := "DB_ColdRoom".iFault_Count,
+      iAvailableCount := "DB_ColdRoom".iAvailable_Count,
+      bCoolingDemand  := "DB_ColdRoom".bCooling_Demand,
+      bDefrostActive  := "DB_ColdRoom".bDefrost_Active,
+      iActiveCount    := "DB_ColdRoom".iActive_Count,
+      bAlarmAck       := FALSE  // 从HMI获取报警确认
+   );
+
+   // 回写报警状态
+   "DB_ColdRoom".wAlarm_Word := "FB_SafetyAlarm".wAlarmWord;
+   "DB_ColdRoom".wStatus_Word := "FB_SafetyAlarm".wStatusWord;
+
+   // ================================================================
+   // 7. 通信数据打包 (发送给S7-1500主站)
+   //    使用PUT/GET由主站读取, 或使用TRSEND发送
+   // ================================================================
+   // 通信数据块 DB_CommData 由 S7-1500 通过 PUT/GET 读取
+   // 数据内容: 温度/状态/报警/运行时间等
+   // (具体实现见通信配置)
+
+END_ORGANIZATION_BLOCK
