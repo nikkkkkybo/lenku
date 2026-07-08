@@ -1,0 +1,132 @@
+{Scl_export_offset 0}
+// ============================================================
+// FB_Rotation - 压缩机轮换管理功能块
+// 冷库温度控制系统 - S7-1200 冷库控制器
+// ============================================================
+// 功能:
+//   1. 按10台压缩机的累计运行时间从短到长排序
+//   2. 生成启动优先级表 (运行时间最短的优先启动)
+//   3. 自动排除故障/隔离的压缩机 (移到优先级末尾)
+//   4. 在每次制冷需求上升沿时更新排序
+//   5. 简单冒泡排序实现, 避免复杂算法带来的隐性风险
+// ============================================================
+// 轮换策略:
+//   运行时间短 → 优先启动 (多干活)
+//   运行时间长 → 延后启动 (多休息)
+//   故障/隔离 → 排到最后 (不参与启动)
+// ============================================================
+
+FUNCTION_BLOCK "FB_Rotation"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_INPUT
+      // --- 触发信号 ---
+      bUpdateTrigger     : Bool;      // 更新触发 (制冷需求上升沿)
+      bEnable            : Bool;      // 使能
+
+      // --- 各台压缩机运行时间 ---
+      aRunTime           : Array[1..10] of DInt;   // 累计运行时间 (秒)
+
+      // --- 各台压缩机状态 ---
+      aFault             : Array[1..10] of Bool;   // 故障标志
+      aIsolated          : Array[1..10] of Bool;   // 隔离标志
+   END_VAR
+
+   VAR_OUTPUT
+      aRotationOrder     : Array[1..10] of Int;    // 轮换优先级表
+      iAvailableCount    : Int;                    // 可用压缩机数量
+      bUpdated           : Bool;                   // 更新完成标志
+   END_VAR
+
+   VAR_TEMP
+      i                  : Int;
+      j                  : Int;
+      iTemp              : Int;
+      aTempOrder         : Array[1..10] of Int;    // 临时排序表
+      aTempTime          : Array[1..10] of DInt;   // 临时运行时间
+      iAvailIdx          : Int;                    // 可用压缩机索引
+      iFaultIdx          : Int;                    // 故障压缩机索引
+   END_VAR
+
+   VAR
+      bLastTrigger       : Bool;                   // 上一次触发 (边沿检测)
+      bTriggerEdge       : Bool;                   // 触发上升沿
+   END_VAR
+
+BEGIN
+
+   // ================================================================
+   // 1. 触发上升沿检测
+   //    仅在制冷需求上升沿时更新排序, 减少不必要的计算
+   // ================================================================
+   bTriggerEdge := bUpdateTrigger AND NOT bLastTrigger;
+   bLastTrigger := bUpdateTrigger;
+
+   // 默认输出
+   bUpdated := FALSE;
+
+   // 未使能时不更新
+   IF NOT bEnable THEN
+      RETURN;
+   END_IF;
+
+   // 仅在触发上升沿时执行排序
+   IF NOT bTriggerEdge THEN
+      RETURN;
+   END_IF;
+
+   // ================================================================
+   // 2. 初始化临时排序表
+   //    将可用压缩机放到前面, 故障/隔离的放到后面
+   // ================================================================
+   iAvailIdx := 0;    // 可用压缩机计数
+   iFaultIdx := 10;   // 故障压缩机从末尾开始排
+
+   FOR i := 1 TO 10 DO
+      IF NOT aFault[i] AND NOT aIsolated[i] THEN
+         // --- 可用压缩机: 放到前面 ---
+         iAvailIdx := iAvailIdx + 1;
+         aTempOrder[iAvailIdx] := i;                        // 压缩机编号
+         aTempTime[iAvailIdx] := aRunTime[i];               // 运行时间
+      ELSE
+         // --- 故障/隔离: 放到后面 ---
+         aTempOrder[iFaultIdx] := i;
+         aTempTime[iFaultIdx] := 16#7FFFFFFF;  // 最大值, 确保排在最后
+         iFaultIdx := iFaultIdx - 1;
+      END_IF;
+   END_FOR;
+
+   iAvailableCount := iAvailIdx;
+
+   // ================================================================
+   // 3. 冒泡排序: 按运行时间从短到长排列
+   //    运行时间最短 → 优先级最高 (排在前面)
+   // ================================================================
+   FOR i := 1 TO (iAvailIdx - 1) DO
+      FOR j := 1 TO (iAvailIdx - i) DO
+         IF aTempTime[j] > aTempTime[j + 1] THEN
+            // 交换运行时间
+            iTemp := aTempTime[j];
+            aTempTime[j] := aTempTime[j + 1];
+            aTempTime[j + 1] := iTemp;
+            // 交换压缩机编号
+            iTemp := aTempOrder[j];
+            aTempOrder[j] := aTempOrder[j + 1];
+            aTempOrder[j + 1] := iTemp;
+         END_IF;
+      END_FOR;
+   END_FOR;
+
+   // ================================================================
+   // 4. 输出排序结果
+   //    aRotationOrder[1] = 运行时间最短且可用的压缩机编号 (优先启动)
+   //    aRotationOrder[10] = 故障/隔离的压缩机 (不参与启动)
+   // ================================================================
+   FOR i := 1 TO 10 DO
+      aRotationOrder[i] := aTempOrder[i];
+   END_FOR;
+
+   bUpdated := TRUE;
+
+END_FUNCTION_BLOCK
