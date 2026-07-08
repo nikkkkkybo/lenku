@@ -1,0 +1,219 @@
+{Scl_export_offset 0}
+// ============================================================
+// FB_Compressor - 单台压缩机控制功能块
+// 冷库温度控制系统 - S7-1200 冷库控制器
+// ============================================================
+// 功能:
+//   1. 自动/手动模式切换
+//   2. 接收分组启动/停止命令
+//   3. 故障检测 (过载, 运行反馈丢失, 启动失败)
+//   4. 故障自动隔离 (不影响其他9台压缩机)
+//   5. 故障锁存与手动复位
+//   6. 累计运行时间统计 (用于轮换)
+//   7. 启动次数统计
+// ============================================================
+// 故障隔离原则:
+//   任一台压缩机故障 → 仅该台隔离停止
+//   其余9台不受影响, 继续正常工作
+//   故障需人工确认复位后方可恢复
+// ============================================================
+
+FUNCTION_BLOCK "FB_Compressor"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_INPUT
+      // --- 控制命令 ---
+      bStartCmd         : Bool;       // 启动命令 (来自分组启动管理)
+      bStopCmd          : Bool;       // 停止命令 (来自分组停止管理)
+      bEnable           : Bool;       // 使能信号 (系统使能)
+
+      // --- 反馈信号 ---
+      bRunFeedback      : Bool;       // 运行反馈 (接触器辅助触点)
+      bOverload         : Bool;       // 过载信号 (热继电器)
+
+      // --- 手动操作 ---
+      bManualMode       : Bool;       // 手动模式 (TRUE=手动, FALSE=自动)
+      bManualStart      : Bool;       // 手动启动
+      bManualStop       : Bool;       // 手动停止
+      bFaultReset       : Bool;       // 故障复位
+
+      // --- 保护参数 ---
+      tFB_Timeout       : Time := T#3s;  // 运行反馈超时时间
+      tMinStopTime      : Time := T#30s; // 最小停机时间 (防短循环)
+   END_VAR
+
+   VAR_OUTPUT
+      bRunOutput        : Bool;       // 运行输出 (到接触器线圈)
+      bFault            : Bool;       // 故障标志
+      bFaultLatched     : Bool;       // 故障锁存 (需复位)
+      bRunning          : Bool;       // 运行中
+      bAvailable        : Bool;       // 可用 (未故障未隔离)
+   END_VAR
+
+   VAR_TEMP
+      bStartEdge        : Bool;       // 启动命令上升沿
+   END_VAR
+
+   VAR
+      // --- 内部状态 ---
+      bInternalRun      : Bool;       // 内部运行指令
+      bStarting         : Bool;       // 启动过渡中
+      bIsolated         : Bool;       // 隔离标志
+      bLastStartCmd     : Bool;       // 上一次启动命令 (边沿检测)
+
+      // --- 计时器 ---
+      tFB_Timer         : Time;       // 反馈超时计时器
+      tStopTimer        : Time;       // 停机时间计时器
+      tScanTime         : Time;       // 扫描周期估计
+
+      // --- 统计 ---
+      diRunTime         : DInt;       // 累计运行时间 (秒)
+      diStartCount      : DInt;       // 累计启动次数
+      diRunTime_ms      : DInt;       // 运行时间毫秒累计 (内部用)
+   END_VAR
+
+BEGIN
+
+   // ================================================================
+   // 0. 扫描周期估计 (用于运行时间累计)
+   // ================================================================
+   // 使用系统时钟, 简化处理: 假设约10ms扫描周期
+   // 精确实现可用 RT_INFO 或时钟中断
+   tScanTime := T#10ms;
+
+   // ================================================================
+   // 1. 故障复位处理
+   // ================================================================
+   IF bFaultReset THEN
+      bFaultLatched := FALSE;
+      bIsolated := FALSE;
+      // 复位后不立即恢复运行, 需重新接收启动命令
+   END_IF;
+
+   // ================================================================
+   // 2. 故障检测
+   // ================================================================
+
+   // --- 2a. 过载故障 ---
+   IF bOverload THEN
+      bFaultLatched := TRUE;
+   END_IF;
+
+   // --- 2b. 启动失败检测 ---
+   //    发出运行指令后, tFB_Timeout 时间内未收到运行反馈 → 故障
+   IF bInternalRun AND NOT bRunFeedback THEN
+      // 反馈超时计时
+      tFB_Timer := tFB_Timer + tScanTime;
+      IF tFB_Timer >= tFB_Timeout THEN
+         bFaultLatched := TRUE;
+      END_IF;
+   ELSE
+      tFB_Timer := T#0s;  // 反馈正常或未运行, 重置计时器
+   END_IF;
+
+   // --- 2c. 运行中反馈丢失检测 ---
+   //    已确认运行后反馈突然消失 → 故障
+   IF bRunning AND NOT bRunFeedback AND NOT bStarting THEN
+      bFaultLatched := TRUE;
+   END_IF;
+
+   // ================================================================
+   // 3. 故障隔离与保护
+   //    故障时: 立即停止该台, 设置隔离标志
+   //    隔离后不影响其他9台压缩机的工作
+   // ================================================================
+   IF bFaultLatched THEN
+      bInternalRun := FALSE;
+      bRunOutput := FALSE;
+      bRunning := FALSE;
+      bStarting := FALSE;
+      bFault := TRUE;
+      bAvailable := FALSE;
+      // 故障状态下直接返回, 不执行后续逻辑
+      RETURN;
+   END_IF;
+
+   bFault := FALSE;
+
+   // ================================================================
+   // 4. 运行控制 (自动/手动模式)
+   // ================================================================
+
+   // --- 启动命令上升沿检测 ---
+   bStartEdge := bStartCmd AND NOT bLastStartCmd;
+   bLastStartCmd := bStartCmd;
+
+   IF bManualMode THEN
+      // ================================================================
+      // 4a. 手动模式: 由操作员直接控制
+      // ================================================================
+      IF bManualStart AND NOT bManualStop THEN
+         bInternalRun := TRUE;
+      ELSIF bManualStop THEN
+         bInternalRun := FALSE;
+      END_IF;
+
+   ELSE
+      // ================================================================
+      // 4b. 自动模式: 由分组启动/停止管理控制
+      // ================================================================
+      IF bStartCmd AND bEnable THEN
+         // 检查最小停机时间 (防短循环保护)
+         IF tStopTimer >= tMinStopTime THEN
+            bInternalRun := TRUE;
+         END_IF;
+      ELSIF bStopCmd OR NOT bEnable THEN
+         bInternalRun := FALSE;
+      END_IF;
+
+   END_IF;
+
+   // ================================================================
+   // 5. 启动过渡状态管理
+   //    发出运行指令后进入"启动过渡中"状态
+   //    收到运行反馈后转为"运行中"状态
+   // ================================================================
+   IF bInternalRun AND NOT bRunning THEN
+      // 启动过渡中
+      bStarting := TRUE;
+      // 启动计数
+      IF bStartEdge THEN
+         diStartCount := diStartCount + 1;
+      END_IF;
+   ELSIF bInternalRun AND bRunFeedback THEN
+      // 已确认运行
+      bStarting := FALSE;
+      bRunning := TRUE;
+   ELSIF NOT bInternalRun THEN
+      // 已停止
+      bStarting := FALSE;
+      bRunning := FALSE;
+   END_IF;
+
+   // ================================================================
+   // 6. 输出与停机时间计时
+   // ================================================================
+   bRunOutput := bInternalRun;
+   bAvailable := TRUE;
+
+   // 停机时间累计 (用于防短循环保护)
+   IF NOT bInternalRun THEN
+      tStopTimer := tStopTimer + tScanTime;
+   ELSE
+      tStopTimer := T#0s;
+   END_IF;
+
+   // ================================================================
+   // 7. 运行时间累计 (用于轮换排序)
+   //    仅在实际运行 (有反馈) 时累计
+   // ================================================================
+   IF bRunning THEN
+      diRunTime_ms := diRunTime_ms + 10;  // 每个扫描周期+10ms
+      IF diRunTime_ms >= 1000 THEN
+         diRunTime := diRunTime + 1;      // 每秒+1
+         diRunTime_ms := diRunTime_ms - 1000;
+      END_IF;
+   END_IF;
+
+END_FUNCTION_BLOCK
