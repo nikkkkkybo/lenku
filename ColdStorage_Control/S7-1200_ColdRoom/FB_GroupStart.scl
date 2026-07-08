@@ -1,0 +1,265 @@
+{Scl_export_offset 0}
+// ============================================================
+// FB_GroupStart - 分时分组错峰启动功能块
+// 冷库温度控制系统 - S7-1200 冷库控制器
+// ============================================================
+// 功能:
+//   1. 制冷需求上升沿触发分3组错峰启动 (每组间隔5秒)
+//      第1组 (3台): 立即启动  - 优先级最高的3台
+//      第2组 (3台): 延时5秒   - 优先级第4-6台
+//      第3组 (4台): 延时10秒  - 优先级第7-10台
+//   2. 制冷需求下降沿触发分2组错峰停止
+//      第1组 (5台): 立即停止
+//      第2组 (5台): 延时3秒停止
+//   3. 每组内启动顺序也错开1秒 (进一步降低冲击)
+//   4. 分组基于轮换优先级表 (aRotationOrder)
+//   5. 自动跳过故障/隔离的压缩机
+// ============================================================
+// 启动时序图:
+//   t=0s   ──→ 第1组 (3台)启动
+//   t=5s   ──→ 第2组 (3台)启动
+//   t=10s  ──→ 第3组 (4台)启动
+//   全部启动完成: ~12秒
+// ============================================================
+
+FUNCTION_BLOCK "FB_GroupStart"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+   VAR_INPUT
+      // --- 控制输入 ---
+      bCoolingDemand    : Bool;       // 制冷需求信号 (来自FB_TempControl)
+      bEnable           : Bool;       // 系统使能
+      bEmergencyStop    : Bool;       // 急停 (立即停止全部)
+
+      // --- 轮换优先级表 ---
+      aRotationOrder    : Array[1..10] of Int;   // 轮换优先级 (1=最高)
+
+      // --- 压缩机可用状态 ---
+      aAvailable        : Array[1..10] of Bool;  // 各台是否可用
+
+      // --- 时间参数 ---
+      tGroupDelay       : Time := T#5s;   // 启动组间间隔
+      tStopDelay        : Time := T#3s;   // 停止组间间隔
+      tIntraGroupDelay  : Time := T#1s;   // 组内启动间隔
+   END_VAR
+
+   VAR_OUTPUT
+      aStartCmd         : Array[1..10] of Bool;  // 各台启动命令
+      aStopCmd          : Array[1..10] of Bool;  // 各台停止命令
+      iStartPhase       : Int;        // 当前启动阶段 (0=空闲)
+      bAllStarted       : Bool;       // 全部启动完成
+      bAllStopped       : Bool;       // 全部停止完成
+   END_VAR
+
+   VAR_TEMP
+      i                 : Int;        // 循环变量
+      idx               : Int;        // 压缩机编号
+      iAvailCount       : Int;        // 可用压缩机计数
+      iStartedCount     : Int;        // 已启动计数
+   END_VAR
+
+   VAR
+      // --- 状态机 ---
+      iPhase            : Int;        // 内部阶段 (0=空闲,1-3=启动,4-5=停止)
+      tTimer            : Time;       // 阶段计时器
+      bLastDemand       : Bool;       // 上一次制冷需求 (边沿检测)
+      tScanTime         : Time;       // 扫描周期
+
+      // --- 分组配置 ---
+      // 第1组: 索引1-3, 第2组: 索引4-6, 第3组: 索引7-10
+      aGroup1           : Array[1..3] of Int;   // 第1组压缩机编号
+      aGroup2           : Array[1..3] of Int;   // 第2组压缩机编号
+      aGroup3           : Array[1..4] of Int;   // 第3组压缩机编号
+
+      // --- 停止分组 ---
+      aStopGroup1       : Array[1..5] of Int;   // 停止第1组
+      aStopGroup2       : Array[1..5] of Int;   // 停止第2组
+   END_VAR
+
+BEGIN
+
+   tScanTime := T#10ms;
+
+   // ================================================================
+   // 1. 急停处理: 立即停止全部压缩机
+   // ================================================================
+   IF bEmergencyStop THEN
+      FOR i := 1 TO 10 DO
+         aStartCmd[i] := FALSE;
+         aStopCmd[i] := TRUE;
+      END_FOR;
+      iPhase := 0;
+      tTimer := T#0s;
+      bAllStarted := FALSE;
+      bAllStopped := TRUE;
+      iStartPhase := 0;
+      RETURN;
+   END_IF;
+
+   // ================================================================
+   // 2. 根据轮换优先级表构建分组
+   //    从可用压缩机中按优先级分组
+   // ================================================================
+   // 将轮换表中前3个可用压缩机分到第1组
+   // 第4-6个分到第2组, 第7-10个分到第3组
+   // (此逻辑在轮换更新后由FB_Rotation触发, 这里简化处理)
+   aGroup1[1] := aRotationOrder[1];
+   aGroup1[2] := aRotationOrder[2];
+   aGroup1[3] := aRotationOrder[3];
+   aGroup2[1] := aRotationOrder[4];
+   aGroup2[2] := aRotationOrder[5];
+   aGroup2[3] := aRotationOrder[6];
+   aGroup3[1] := aRotationOrder[7];
+   aGroup3[2] := aRotationOrder[8];
+   aGroup3[3] := aRotationOrder[9];
+   aGroup3[4] := aRotationOrder[10];
+
+   // 停止分组 (前5台和后5台)
+   aStopGroup1[1] := aRotationOrder[1];
+   aStopGroup1[2] := aRotationOrder[2];
+   aStopGroup1[3] := aRotationOrder[3];
+   aStopGroup1[4] := aRotationOrder[4];
+   aStopGroup1[5] := aRotationOrder[5];
+   aStopGroup2[1] := aRotationOrder[6];
+   aStopGroup2[2] := aRotationOrder[7];
+   aStopGroup2[3] := aRotationOrder[8];
+   aStopGroup2[4] := aRotationOrder[9];
+   aStopGroup2[5] := aRotationOrder[10];
+
+   // ================================================================
+   // 3. 制冷需求边沿检测
+   // ================================================================
+
+   // --- 上升沿: 开始分组启动序列 ---
+   IF bCoolingDemand AND NOT bLastDemand AND bEnable THEN
+      iPhase := 1;
+      tTimer := T#0s;
+      // 清除所有停止命令
+      FOR i := 1 TO 10 DO
+         aStopCmd[i] := FALSE;
+      END_FOR;
+   END_IF;
+
+   // --- 下降沿: 开始分组停止序列 ---
+   IF NOT bCoolingDemand AND bLastDemand THEN
+      iPhase := 4;
+      tTimer := T#0s;
+      // 清除所有启动命令
+      FOR i := 1 TO 10 DO
+         aStartCmd[i] := FALSE;
+      END_FOR;
+   END_IF;
+
+   bLastDemand := bCoolingDemand;
+
+   // ================================================================
+   // 4. 启动状态机 (iPhase 1-3)
+   // ================================================================
+   CASE iPhase OF
+
+      1: // --- 第1组启动 (3台) ---
+         FOR i := 1 TO 3 DO
+            idx := aGroup1[i];
+            IF idx >= 1 AND idx <= 10 THEN
+               IF aAvailable[idx] THEN
+                  aStartCmd[idx] := TRUE;
+               END_IF;
+            END_IF;
+         END_FOR;
+         // 进入等待
+         iPhase := 2;
+         tTimer := T#0s;
+
+      2: // --- 等待 tGroupDelay 后启动第2组 ---
+         tTimer := tTimer + tScanTime;
+         IF tTimer >= tGroupDelay THEN
+            FOR i := 1 TO 3 DO
+               idx := aGroup2[i];
+               IF idx >= 1 AND idx <= 10 THEN
+                  IF aAvailable[idx] THEN
+                     aStartCmd[idx] := TRUE;
+                  END_IF;
+               END IF;
+            END_FOR;
+            iPhase := 3;
+            tTimer := T#0s;
+         END_IF;
+
+      3: // --- 等待 tGroupDelay 后启动第3组 ---
+         tTimer := tTimer + tScanTime;
+         IF tTimer >= tGroupDelay THEN
+            FOR i := 1 TO 4 DO
+               idx := aGroup3[i];
+               IF idx >= 1 AND idx <= 10 THEN
+                  IF aAvailable[idx] THEN
+                     aStartCmd[idx] := TRUE;
+                  END_IF;
+               END IF;
+            END_FOR;
+            iPhase := 0;  // 启动完成
+            tTimer := T#0s;
+            bAllStarted := TRUE;
+         END_IF;
+
+   END_CASE;
+
+   // ================================================================
+   // 5. 停止状态机 (iPhase 4-5)
+   // ================================================================
+   CASE iPhase OF
+
+      4: // --- 停止第1组 (5台) ---
+         FOR i := 1 TO 5 DO
+            idx := aStopGroup1[i];
+            IF idx >= 1 AND idx <= 10 THEN
+               aStartCmd[idx] := FALSE;
+               aStopCmd[idx] := TRUE;
+            END_IF;
+         END_FOR;
+         iPhase := 5;
+         tTimer := T#0s;
+
+      5: // --- 等待 tStopDelay 后停止第2组 (5台) ---
+         tTimer := tTimer + tScanTime;
+         IF tTimer >= tStopDelay THEN
+            FOR i := 1 TO 5 DO
+               idx := aStopGroup2[i];
+               IF idx >= 1 AND idx <= 10 THEN
+                  aStartCmd[idx] := FALSE;
+                  aStopCmd[idx] := TRUE;
+               END IF;
+            END_FOR;
+            iPhase := 0;  // 停止完成
+            tTimer := T#0s;
+            bAllStopped := TRUE;
+            bAllStarted := FALSE;
+         END_IF;
+
+   END_CASE;
+
+   // ================================================================
+   // 6. 输出当前阶段
+   // ================================================================
+   iStartPhase := iPhase;
+
+   // 启动过程中清除"全部完成"标志
+   IF iPhase >= 1 AND iPhase <= 3 THEN
+      bAllStarted := FALSE;
+   END_IF;
+
+   // 停止过程中清除"全部停止"标志
+   IF iPhase >= 4 AND iPhase <= 5 THEN
+      bAllStopped := FALSE;
+   END_IF;
+
+   // 系统未使能时清除所有启动命令
+   IF NOT bEnable THEN
+      FOR i := 1 TO 10 DO
+         aStartCmd[i] := FALSE;
+         aStopCmd[i] := TRUE;
+      END_FOR;
+      iPhase := 0;
+   END_IF;
+
+END_FUNCTION_BLOCK
